@@ -46,13 +46,16 @@ app.use(helmet({
     crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" }
 }));
 
-// 2. CORS Configuration
+// 2. CORS Configuration - FIXED to allow Vercel preview URLs
 const corsOptions = {
     origin: function (origin, callback) {
+        // In development, allow all origins
         if (!origin || process.env.NODE_ENV === 'development') {
+            console.log('CORS: Allowing development origin');
             return callback(null, true);
         }
         
+        // List of exact allowed origins
         const allowedOrigins = [
             'http://localhost:3000',
             'http://localhost:5000',
@@ -62,12 +65,25 @@ const corsOptions = {
             process.env.FRONTEND_URL
         ].filter(Boolean);
 
+        // Check if origin exactly matches allowed origins
         if (allowedOrigins.includes(origin)) {
-            callback(null, true);
-        } else {
-            console.log('CORS rejected origin:', origin);
-            callback(new Error('This origin is not allowed by CORS'));
+            console.log('CORS: Allowed exact match origin:', origin);
+            return callback(null, true);
         }
+
+        // FIXED: Allow ALL Vercel preview and production URLs
+        // Vercel URLs follow patterns like:
+        // - https://your-app.vercel.app (production)
+        // - https://your-app-xyz123.vercel.app (preview)
+        // - https://your-app-git-branch-username.vercel.app (git branch)
+        if (origin.endsWith('.vercel.app')) {
+            console.log('CORS: Allowed Vercel URL:', origin);
+            return callback(null, true);
+        }
+
+        // Reject all other origins
+        console.log('CORS: REJECTED origin:', origin);
+        callback(new Error('This origin is not allowed by CORS'));
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -190,6 +206,8 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('Server ready to accept connections');
     console.log(`Health check: http://localhost:${PORT}/health`);
     console.log(`API endpoint: http://localhost:${PORT}/api/`);
+    console.log('');
+    console.log('CORS: Allowing all *.vercel.app domains');
 });
 
 // --- Graceful Shutdown ---

@@ -9,7 +9,6 @@ const morgan = require('morgan');
 require('dotenv').config();
 
 // --- Platform Detection ---
-// This is useful for running the same code locally for testing.
 const IS_RENDER = process.env.RENDER === 'true';
 const IS_LOCAL = !IS_RENDER;
 
@@ -24,16 +23,13 @@ const tasksHandler = require('./api/tasks');
 const paymentsHandler = require('./api/payments');
 const submissionsHandler = require('./api/submissions');
 
-// --- Middleware ---
-// const { verifyToken } = require('./middleware/auth'); // Uncomment if you add auth middleware
-
 // --- Cron Jobs (Render/Local only) ---
 let cronJobs;
 if (IS_RENDER || IS_LOCAL) {
     try {
-        cronJobs = require('./cron-jobs');
+        cronJobs = require('./jobs');
     } catch (e) {
-        console.warn("Could not load './cron-jobs'. Cron jobs will be disabled.");
+        console.warn("Could not load './jobs'. Cron jobs will be disabled.");
         cronJobs = null;
     }
 }
@@ -45,29 +41,41 @@ const PORT = process.env.PORT || 3000;
 // --- Core Middleware ---
 
 // 1. Security with Helmet
-app.use(helmet());
+app.use(helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" }
+}));
 
 // 2. CORS Configuration
 const corsOptions = {
     origin: function (origin, callback) {
-        // Best practice: Pull allowed origins from environment variables.
+        if (!origin || process.env.NODE_ENV === 'development') {
+            return callback(null, true);
+        }
+        
         const allowedOrigins = [
-            'http://localhost:3000',          // For local frontend dev
-            'https://eb-traker.vercel.app',   // Your production frontend
-            process.env.FRONTEND_URL          // Another potential frontend URL from .env
-        ].filter(Boolean); // filter(Boolean) removes any undefined/null entries
+            'http://localhost:3000',
+            'http://localhost:5000',
+            'http://localhost:8080',
+            'https://eb-traker.vercel.app',
+            'https://eb-tracker-backend.onrender.com',
+            process.env.FRONTEND_URL
+        ].filter(Boolean);
 
-        if (!origin || allowedOrigins.includes(origin)) {
+        if (allowedOrigins.includes(origin)) {
             callback(null, true);
         } else {
+            console.log('CORS rejected origin:', origin);
             callback(new Error('This origin is not allowed by CORS'));
         }
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    exposedHeaders: ['Content-Range', 'X-Content-Range']
 };
 app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 // 3. Performance with Compression
 app.use(compression());
@@ -79,74 +87,79 @@ app.use(process.env.NODE_ENV === 'production' ? morgan('combined') : morgan('dev
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// --- Root Endpoint ---
+app.get('/', (req, res) => {
+    res.json({
+        message: 'EB-Tracker Backend API',
+        version: '1.0.0',
+        status: 'running',
+        timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV || 'development',
+        endpoints: {
+            health: '/health',
+            api: '/api/*'
+        }
+    });
+});
 
 // --- Health Check Endpoint ---
-// Essential for Render's automated health checks.
 app.get('/health', async (req, res) => {
     const health = {
         status: 'OK',
         platform: IS_RENDER ? 'Render' : 'Local',
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
+        environment: process.env.NODE_ENV || 'development',
+        nodeVersion: process.version
     };
 
-    // Optional but recommended: Check database connection.
     try {
         const admin = require('./api/_firebase-admin');
         const db = admin.firestore();
-        // A quick, non-destructive write/delete confirms connectivity and permissions.
         const healthDoc = db.collection('_health').doc('check');
         await healthDoc.set({ timestamp: new Date() });
         await healthDoc.delete();
         health.firebase = 'Connected';
     } catch (error) {
         console.error("Health check Firebase error:", error.message);
-        health.firebase = 'Error';
-        health.status = 'Degraded'; // Signals that a critical dependency is failing.
+        health.firebase = 'Error: ' + error.message;
+        health.status = 'Degraded';
     }
 
     res.status(health.status === 'OK' ? 200 : 503).json(health);
 });
 
-
 // --- API Routes ---
 const apiRouter = express.Router();
 
-// Register all API handlers.
 apiRouter.use('/proposals', proposalsHandler);
 apiRouter.use('/notifications', notificationsHandler);
 apiRouter.use('/dashboard', dashboardHandler);
 apiRouter.use('/activities', activitiesHandler);
-apiRouter.use('/files', filesHandler); // File operations are handled directly on Render.
+apiRouter.use('/files', filesHandler);
 apiRouter.use('/projects', projectsHandler);
 apiRouter.use('/tasks', tasksHandler);
 apiRouter.use('/payments', paymentsHandler);
 apiRouter.use('/submissions', submissionsHandler);
 
-// Mount the API router under the /api prefix.
 app.use('/api', apiRouter);
 
-
 // --- Platform-Specific Features (Cron Jobs) ---
-// This block ensures cron jobs only run on Render or a local machine.
 if ((IS_RENDER || IS_LOCAL) && process.env.ENABLE_CRON_JOBS === 'true' && cronJobs) {
     cronJobs.startCronJobs();
-    console.log('Cron jobs initialized and started.');
+    console.log('✓ Cron jobs initialized and started.');
 }
 
 // --- Error Handling ---
-// These must be the LAST `app.use()` calls.
-
-// 404 Not Found Handler (for unmatched API routes).
 app.use((req, res, next) => {
     res.status(404).json({
         success: false,
         error: 'API endpoint not found',
-        path: req.path
+        path: req.path,
+        method: req.method
     });
 });
 
-// General Error Handling Middleware.
 app.use((err, req, res, next) => {
     console.error('Unhandled Error:', {
         message: err.message,
@@ -159,27 +172,41 @@ app.use((err, req, res, next) => {
     res.status(err.status || 500).json({
         success: false,
         error: isProduction ? 'An internal server error occurred.' : err.message,
-        ...( !isProduction && { stack: err.stack } ) // Only show stack in development.
+        ...( !isProduction && { stack: err.stack } )
     });
 });
 
-
 // --- Server Startup ---
-const server = app.listen(PORT, () => {
-    console.log('╔════════════════════════════════════════╗');
+const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log('╔═══════════════════════════════════════╗');
     console.log('║       EB-Tracker Server Started        ║');
-    console.log('╠════════════════════════════════════════╣');
+    console.log('╠═══════════════════════════════════════╣');
     console.log(`║ Platform:    ${IS_RENDER ? 'Render' : 'Local'}                ║`);
     console.log(`║ Port:        ${PORT}                       ║`);
     console.log(`║ Environment: ${process.env.NODE_ENV || 'development'}           ║`);
     console.log(`║ Cron Jobs:   ${process.env.ENABLE_CRON_JOBS === 'true' && cronJobs ? 'Enabled' : 'Disabled'}             ║`);
-    console.log('╚════════════════════════════════════════╝');
+    console.log('╚═══════════════════════════════════════╝');
+    console.log('');
+    console.log('Server ready to accept connections');
+    console.log(`Health check: http://localhost:${PORT}/health`);
+    console.log(`API endpoint: http://localhost:${PORT}/api/`);
 });
 
 // --- Graceful Shutdown ---
-// Important for Render to allow existing requests to finish before shutdown on deploys.
 process.on('SIGTERM', () => {
     console.log('SIGTERM signal received. Closing HTTP server.');
+    if ((IS_RENDER || IS_LOCAL) && cronJobs) {
+        cronJobs.stopCronJobs();
+        console.log('Cron jobs stopped.');
+    }
+    server.close(() => {
+        console.log('HTTP server closed. Exiting process.');
+        process.exit(0);
+    });
+});
+
+process.on('SIGINT', () => {
+    console.log('SIGINT signal received. Closing HTTP server.');
     if ((IS_RENDER || IS_LOCAL) && cronJobs) {
         cronJobs.stopCronJobs();
         console.log('Cron jobs stopped.');

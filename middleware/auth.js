@@ -38,7 +38,6 @@ async function verifyToken(req, res, next) {
   }
 }
 
-// This requireRole function can remain as is
 function requireRole(allowedRoles) {
     return (req, res, next) => {
         if (!req.user) {

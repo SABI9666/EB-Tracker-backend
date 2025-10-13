@@ -22,6 +22,7 @@ const projectsHandler = require('./api/projects');
 const tasksHandler = require('./api/tasks');
 const paymentsHandler = require('./api/payments');
 const submissionsHandler = require('./api/submissions');
+const invoicesHandler = require('./api/invoices'); // Added invoice handler
 
 // --- Cron Jobs (Render/Local only) ---
 let cronJobs;
@@ -157,6 +158,7 @@ apiRouter.use('/projects', projectsHandler);
 apiRouter.use('/tasks', tasksHandler);
 apiRouter.use('/payments', paymentsHandler);
 apiRouter.use('/submissions', submissionsHandler);
+apiRouter.use('/invoices', invoicesHandler); // Added invoice route
 
 app.use('/api', apiRouter);
 
@@ -195,12 +197,12 @@ app.use((err, req, res, next) => {
 // --- Server Startup ---
 const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('╔═══════════════════════════════════════╗');
-    console.log('║       EB-Tracker Server Started        ║');
+    console.log('║       EB-Tracker Server Started       ║');
     console.log('╠═══════════════════════════════════════╣');
-    console.log(`║ Platform:    ${IS_RENDER ? 'Render' : 'Local'}                ║`);
+    console.log(`║ Platform:    ${IS_RENDER ? 'Render' : 'Local'}                 ║`);
     console.log(`║ Port:        ${PORT}                       ║`);
     console.log(`║ Environment: ${process.env.NODE_ENV || 'development'}           ║`);
-    console.log(`║ Cron Jobs:   ${process.env.ENABLE_CRON_JOBS === 'true' && cronJobs ? 'Enabled' : 'Disabled'}             ║`);
+    console.log(`║ Cron Jobs:   ${process.env.ENABLE_CRON_JOBS === 'true' && cronJobs ? 'Enabled' : 'Disabled'}              ║`);
     console.log('╚═══════════════════════════════════════╝');
     console.log('');
     console.log('Server ready to accept connections');
@@ -234,4 +236,3 @@ process.on('SIGINT', () => {
         process.exit(0);
     });
 });
-

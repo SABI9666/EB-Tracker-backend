@@ -72,11 +72,11 @@ try {
     console.error('   3. Click "Generate New Private Key" and download the JSON file');
     console.error('   4. In Render Dashboard → Your Service → Environment tab');
     console.error('   5. Add environment variable:');
-    console.error('      • Key: FIREBASE_SERVICE_ACCOUNT_KEY');
-    console.error('      • Value: Paste the ENTIRE JSON content (including { and })');
+    console.error('     • Key: FIREBASE_SERVICE_ACCOUNT_KEY');
+    console.error('     • Value: Paste the ENTIRE JSON content (including { and })');
     console.error('   6. OR encode it as Base64:');
-    console.error('      • Run: cat firebase-key.json | base64');
-    console.error('      • Paste the Base64 string as the value');
+    console.error('     • Run: cat firebase-key.json | base64');
+    console.error('     • Paste the Base64 string as the value');
     console.error('   7. Save and redeploy\n');
     
     db = null;
@@ -207,36 +207,53 @@ app.use(helmet({
     crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" }
 }));
 
-// CORS Configuration
-app.use(cors({
-    origin: function(origin, callback) {
-        // Allow requests with no origin (mobile apps, curl, Postman, etc.)
-        if (!origin) return callback(null, true);
-
-        const allowedOrigins = [
-            'http://localhost:5000',
-            'http://127.0.0.1:5000',
-            'http://localhost:3000',
-            'http://127.0.0.1:3000',
-            'https://eb-tracker-42881.web.app',
-            'https://eb-tracker-42881.firebaseapp.com'
-        ];
-
-        if (allowedOrigins.indexOf(origin) !== -1 || origin.endsWith('.vercel.app')) {
-            callback(null, true);
-        } else {
-            console.log('⚠️  CORS: Blocked request from origin:', origin);
-            callback(new Error('Not allowed by CORS'));
+// CORS Configuration - Allow requests from multiple origins
+const allowedOrigins = [
+    'http://localhost:3000',
+    'http://localhost:5000',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:5000',
+    'https://eb-tracker-frontend-gm6qlybj1-sabins-projects-02d8db3a.vercel.app',
+    'https://eb-tracker-frontend-o4nm6wgs4-sabins-projects-02d8db3a.vercel.app',
+    // Add your production Vercel domain here when deployed
+];
+const corsOptions = {
+    origin: function (origin, callback) {
+        console.log('🌐 CORS: Request from origin:', origin);
+                // Allow requests with no origin (like mobile apps, Postman, or same-origin)
+        if (!origin) {
+            console.log('✅ CORS: Allowing request with no origin');
+            return callback(null, true);
         }
+                // Check if origin is in allowed list
+        if (allowedOrigins.includes(origin)) {
+            console.log('✅ CORS: Origin is in allowed list');
+            return callback(null, true);
+        }
+                // Allow Claude artifact domains (*.claude.ai and *.usercontent.goog)
+        if (origin.includes('claude.ai') || origin.includes('usercontent.goog')) {
+            console.log('✅ CORS: Allowing Claude artifact domain');
+            return callback(null, true);
+        }
+                // Allow any localhost/127.0.0.1 for development
+        if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+            console.log('✅ CORS: Allowing localhost');
+            return callback(null, true);
+        }
+                // Block all other origins
+        console.log('⚠️  CORS: Blocked request from origin:', origin);
+        callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-    maxAge: 86400 // 24 hours
-}));
-
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    exposedHeaders: ['Content-Range', 'X-Content-Range'],
+    maxAge: 600 // Cache preflight requests for 10 minutes
+};
+app.use(cors(corsOptions));
 // Handle preflight requests
-app.options('*', cors());
+app.options('*', cors(corsOptions));
+console.log('✅ CORS configured with allowed origins:', allowedOrigins);
 
 // Performance & Logging
 app.use(compression());
@@ -668,7 +685,7 @@ app.use((err, req, res, next) => {
 // --- Server Startup ---
 const server = app.listen(PORT, () => {
     console.log('\n╔═══════════════════════════════════════════════════════════╗');
-    console.log('║            EB-TRACKER BACKEND SERVER                      ║');
+    console.log('║               EB-TRACKER BACKEND SERVER               ║');
     console.log('╠═══════════════════════════════════════════════════════════╣');
     console.log(`║  Status:      🟢 RUNNING                                  ║`);
     console.log(`║  Port:        ${PORT.toString().padEnd(44)}║`);

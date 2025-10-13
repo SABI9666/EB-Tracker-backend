@@ -135,6 +135,42 @@ const logActivity = async (uid, name, role, type, details, proposalId = null) =>
     // }
 };
 
+// Helper functions for file access control
+function canUserViewFile(file, userRole, userId) {
+    // Links and project files are viewable by all
+    if (!file.fileType || file.fileType === 'project' || file.fileType === 'link') {
+        return true;
+    }
+
+    // Estimation files have special rules
+    if (file.fileType === 'estimation') {
+        // Estimators, COO, and Directors can always view
+        if (['estimator', 'coo', 'director'].includes(userRole)) {
+            return true;
+        }
+
+        // BDM can only view estimation files for approved proposals
+        // This would need proposal status check, but for now allow all
+        return true;
+    }
+
+    return true;
+}
+
+function canUserDeleteFile(file, userRole, userId) {
+    // Users can delete their own files
+    if (file.uploadedBy === userId) {
+        return true;
+    }
+
+    // COO and Director can delete any file
+    if (['coo', 'director'].includes(userRole)) {
+        return true;
+    }
+
+    return false;
+}
+
 // --- API Route Handlers (Placeholders) ---
 const proposalsHandler = express.Router().get('/', (req, res) => res.json({ message: 'Proposals endpoint' }));
 const notificationsHandler = express.Router().get('/', (req, res) => res.json({ message: 'Notifications endpoint' }));
@@ -233,7 +269,11 @@ app.get('/health', (req, res) => {
     });
 });
 
-// File upload endpoint
+// ============================================
+// FILE MANAGEMENT ENDPOINTS
+// ============================================
+
+// POST - Upload files or links
 app.post('/api/files', requireFirebase, authenticate, upload.array('files', 10), async (req, res) => {
     console.log('\n📤 File upload request received');
     console.log(`   User: ${req.user.uid} (${req.user.name})`);
@@ -380,6 +420,164 @@ app.post('/api/files', requireFirebase, authenticate, upload.array('files', 10),
         res.status(500).json({
             success: false,
             error: error.message || 'File upload failed'
+        });
+    }
+});
+
+// GET - Retrieve files
+app.get('/api/files', requireFirebase, authenticate, async (req, res) => {
+    console.log('\n📥 File retrieval request received');
+    console.log(`   User: ${req.user.uid} (${req.user.name}, ${req.user.role})`);
+    console.log(`   Query params:`, req.query);
+
+    try {
+        const { proposalId, fileType, id } = req.query;
+
+        // Get single file by ID
+        if (id) {
+            const fileDoc = await db.collection('files').doc(id).get();
+            if (!fileDoc.exists) {
+                return res.status(404).json({
+                    success: false,
+                    error: 'File not found'
+                });
+            }
+
+            const fileData = { id: fileDoc.id, ...fileDoc.data() };
+            
+            // Add access control flags
+            fileData.canView = canUserViewFile(fileData, req.user.role, req.user.uid);
+            fileData.canDownload = fileData.canView;
+            fileData.canDelete = canUserDeleteFile(fileData, req.user.role, req.user.uid);
+
+            return res.json({
+                success: true,
+                data: fileData
+            });
+        }
+
+        // Build query
+        let query = db.collection('files');
+
+        // Filter by proposal ID if provided
+        if (proposalId) {
+            query = query.where('proposalId', '==', proposalId);
+        }
+
+        // Filter by file type if provided
+        if (fileType) {
+            query = query.where('fileType', '==', fileType);
+        }
+
+        // For BDM role, only show their own files
+        if (req.user.role === 'bdm') {
+            query = query.where('uploadedBy', '==', req.user.uid);
+        }
+
+        // Execute query
+        const snapshot = await query.orderBy('uploadedAt', 'desc').get();
+        
+        const files = [];
+        snapshot.forEach(doc => {
+            const fileData = { id: doc.id, ...doc.data() };
+            
+            // Add access control flags
+            fileData.canView = canUserViewFile(fileData, req.user.role, req.user.uid);
+            fileData.canDownload = fileData.canView;
+            fileData.canDelete = canUserDeleteFile(fileData, req.user.role, req.user.uid);
+            
+            // Only include files the user can view
+            if (fileData.canView) {
+                files.push(fileData);
+            }
+        });
+
+        console.log(`✅ Retrieved ${files.length} file(s)`);
+
+        res.json({
+            success: true,
+            data: files
+        });
+
+    } catch (error) {
+        console.error('❌ File retrieval error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Failed to retrieve files'
+        });
+    }
+});
+
+// DELETE - Delete file
+app.delete('/api/files', requireFirebase, authenticate, async (req, res) => {
+    console.log('\n🗑️ File deletion request received');
+    console.log(`   User: ${req.user.uid} (${req.user.name}, ${req.user.role})`);
+    console.log(`   Query params:`, req.query);
+
+    try {
+        const { id } = req.query;
+
+        if (!id) {
+            return res.status(400).json({
+                success: false,
+                error: 'File ID is required'
+            });
+        }
+
+        // Get file metadata
+        const fileDoc = await db.collection('files').doc(id).get();
+        
+        if (!fileDoc.exists) {
+            return res.status(404).json({
+                success: false,
+                error: 'File not found'
+            });
+        }
+
+        const fileData = fileDoc.data();
+
+        // Check if user can delete this file
+        if (!canUserDeleteFile({ ...fileData, id }, req.user.role, req.user.uid)) {
+            return res.status(403).json({
+                success: false,
+                error: 'You do not have permission to delete this file'
+            });
+        }
+
+        // Delete from Storage if it's not a link
+        if (fileData.fileType !== 'link' && fileData.filename) {
+            try {
+                const bucket = admin.storage().bucket();
+                await bucket.file(fileData.filename).delete();
+                console.log(`✅ Deleted from Storage: ${fileData.filename}`);
+            } catch (storageError) {
+                console.warn(`⚠️ Storage deletion failed (file may not exist):`, storageError.message);
+            }
+        }
+
+        // Delete from Firestore
+        await db.collection('files').doc(id).delete();
+        console.log(`✅ Deleted from Firestore: ${id}`);
+
+        await logActivity(
+            req.user.uid,
+            req.user.name,
+            req.user.role,
+            'file_delete',
+            `Deleted file: ${fileData.originalName}`,
+            fileData.proposalId
+        );
+
+        res.json({
+            success: true,
+            message: 'File deleted successfully'
+        });
+
+    } catch (error) {
+        console.error('❌ File deletion error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Failed to delete file'
         });
     }
 });

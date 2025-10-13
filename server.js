@@ -13,22 +13,44 @@ const multer = require('multer');
 const path = require('path');
 
 // --- Firebase Admin Setup ---
-// NOTE: Ensure your Firebase service account key is configured in your environment
-// (e.g., as GOOGLE_APPLICATION_CREDENTIALS or a FIREBASE_SERVICE_ACCOUNT_KEY variable)
 const admin = require('firebase-admin');
-
-// Initialize Firebase Admin SDK
+let db = null;
+let isFirebaseInitialized = false;
 try {
+    if (!process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+        throw new Error('FIREBASE_SERVICE_ACCOUNT_KEY environment variable is not set');
+    }
+
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+
     admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-      storageBucket: `${serviceAccount.project_id}.appspot.com`
+        credential: admin.credential.cert(serviceAccount),
+        storageBucket: `${serviceAccount.project_id}.appspot.com`
     });
+
+    db = admin.firestore();
+    isFirebaseInitialized = true;
     console.log('✓ Firebase Admin initialized successfully.');
 } catch (error) {
-    console.error('❌ Firebase Admin initialization failed. Ensure FIREBASE_SERVICE_ACCOUNT_KEY is set correctly in your environment.', error.message);
+    console.error('❌ Firebase Admin initialization failed:', error.message);
+    console.error('⚠️  Server will start in LIMITED mode without Firebase.');
+    console.error('📝 To enable Firebase:');
+    console.error('   1. Go to Render Dashboard → Your Service → Environment');
+    console.error('   2. Add environment variable: FIREBASE_SERVICE_ACCOUNT_KEY');
+    console.error('   3. Value: Your Firebase service account JSON (entire content)');
+    console.error('   4. Save and redeploy\n');
 }
-const db = admin.firestore();
+// Middleware to check if Firebase is available
+const requireFirebase = (req, res, next) => {
+    if (!isFirebaseInitialized || !db) {
+        return res.status(503).json({
+            success: false,
+            error: 'Firebase is not configured. Please contact the administrator.',
+            hint: 'Set FIREBASE_SERVICE_ACCOUNT_KEY environment variable'
+        });
+    }
+    next();
+};
 
 
 // --- Placeholder Middleware & Helpers ---
@@ -141,7 +163,7 @@ app.get('/health', (req, res) => res.json({ status: 'OK', timestamp: new Date() 
 
 
 // 3. REPLACE your existing /api/files POST endpoint with this:
-app.post('/api/files', authenticate, upload.array('files', 10), async (req, res) => {
+app.post('/api/files', requireFirebase, authenticate, upload.array('files', 10), async (req, res) => {
     console.log('📤 File upload request received');
     console.log('User:', req.user.uid);
     console.log('Body:', req.body);
@@ -287,7 +309,7 @@ app.post('/api/files', authenticate, upload.array('files', 10), async (req, res)
 
 
 // 6. Add a test endpoint to verify file upload is working
-app.post('/api/files/test', authenticate, upload.single('testFile'), async (req, res) => {
+app.post('/api/files/test', requireFirebase, authenticate, upload.single('testFile'), async (req, res) => {
     console.log('🧪 Test file upload endpoint hit');
     console.log('File received:', req.file);
     console.log('Body:', req.body);
@@ -364,3 +386,4 @@ app.listen(PORT, () => {
     console.log(`🔗 Local URL: http://localhost:${PORT}`);
     console.log(`🌿 Environment: ${process.env.NODE_ENV || 'development'}`);
 });
+

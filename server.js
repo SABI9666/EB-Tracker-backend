@@ -1,4 +1,4 @@
-// server.js - Backend server with file upload handling and robust Firebase initialization
+// server.js - Backend server optimized for Render
 
 // --- Core Dependencies ---
 const express = require('express');
@@ -8,715 +8,229 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 require('dotenv').config();
 
-const multer = require('multer');
-const path = require('path');
+// --- Platform Detection ---
+const IS_RENDER = process.env.RENDER === 'true';
+const IS_LOCAL = !IS_RENDER;
 
-// --- Firebase Admin Setup with Enhanced Error Handling ---
-const admin = require('firebase-admin');
-let db = null;
-let isFirebaseInitialized = false;
+// --- API Handlers ---
+const proposalsHandler = require('./api/proposals');
+const filesHandler = require('./api/files');
+const notificationsHandler = require('./api/notifications');
+const dashboardHandler = require('./api/dashboard');
+const activitiesHandler = require('./api/activities');
+const projectsHandler = require('./api/projects');
+const tasksHandler = require('./api/tasks');
+const paymentsHandler = require('./api/payments');
+const submissionsHandler = require('./api/submissions');
 
-try {
-    console.log('🔧 Initializing Firebase Admin SDK...');
-    
-    if (!process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
-        throw new Error('FIREBASE_SERVICE_ACCOUNT_KEY environment variable is not set');
-    }
-
-    let serviceAccount;
-    const envKey = process.env.FIREBASE_SERVICE_ACCOUNT_KEY.trim();
-
-    // Support both Base64 encoded and direct JSON formats
+// --- Cron Jobs (Render/Local only) ---
+let cronJobs;
+if (IS_RENDER || IS_LOCAL) {
     try {
-        // Try Base64 decoding first (common for environment variables with special characters)
-        if (envKey.startsWith('eyJ') || /^[A-Za-z0-9+/=]+$/.test(envKey.substring(0, 50))) {
-            console.log('📦 Detected Base64 encoded Firebase key, decoding...');
-            const decoded = Buffer.from(envKey, 'base64').toString('utf-8');
-            serviceAccount = JSON.parse(decoded);
-            console.log('✓ Base64 key decoded successfully');
-        } else {
-            console.log('📄 Using direct JSON Firebase key');
-            serviceAccount = JSON.parse(envKey);
-        }
-    } catch (parseError) {
-        console.error('Failed to parse Firebase key:', parseError.message);
-        throw new Error(`Invalid Firebase service account format: ${parseError.message}`);
+        cronJobs = require('./jobs');
+    } catch (e) {
+        console.warn("Could not load './jobs'. Cron jobs will be disabled.");
+        cronJobs = null;
     }
-
-    // Validate service account structure
-    if (!serviceAccount.project_id || !serviceAccount.private_key || !serviceAccount.client_email) {
-        throw new Error('Invalid service account: missing required fields (project_id, private_key, client_email)');
-    }
-
-    // Initialize Firebase Admin
-    admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
-        storageBucket: `${serviceAccount.project_id}.appspot.com`
-    });
-
-    // Initialize Firestore
-    db = admin.firestore();
-    isFirebaseInitialized = true;
-    
-    console.log('✅ Firebase Admin initialized successfully');
-    console.log(`   Project ID: ${serviceAccount.project_id}`);
-    console.log(`   Storage Bucket: ${serviceAccount.project_id}.appspot.com`);
-    console.log(`   Client Email: ${serviceAccount.client_email}`);
-
-} catch (error) {
-    console.error('❌ Firebase Admin initialization failed:', error.message);
-    console.error('\n⚠️  SERVER WILL START IN LIMITED MODE (Firebase features disabled)\n');
-    console.error('📋 Troubleshooting Guide:');
-    console.error('   1. Go to Firebase Console: https://console.firebase.google.com/');
-    console.error('   2. Select your project → Project Settings → Service Accounts');
-    console.error('   3. Click "Generate New Private Key" and download the JSON file');
-    console.error('   4. In Render Dashboard → Your Service → Environment tab');
-    console.error('   5. Add environment variable:');
-    console.error('     • Key: FIREBASE_SERVICE_ACCOUNT_KEY');
-    console.error('     • Value: Paste the ENTIRE JSON content (including { and })');
-    console.error('   6. OR encode it as Base64:');
-    console.error('     • Run: cat firebase-key.json | base64');
-    console.error('     • Paste the Base64 string as the value');
-    console.error('   7. Save and redeploy\n');
-    
-    db = null;
-    isFirebaseInitialized = false;
 }
-
-// Middleware to protect Firebase-dependent routes
-const requireFirebase = (req, res, next) => {
-    if (!isFirebaseInitialized || !db) {
-        console.warn('⚠️  Firebase-dependent endpoint called but Firebase is not initialized');
-        return res.status(503).json({
-            success: false,
-            error: 'Firebase service is currently unavailable',
-            message: 'The server is running but Firebase is not properly configured. Please contact the administrator.',
-            details: 'Set FIREBASE_SERVICE_ACCOUNT_KEY environment variable'
-        });
-    }
-    next();
-};
-
-// --- Placeholder Middleware & Helpers ---
-const authenticate = async (req, res, next) => {
-    console.log('🔐 Auth middleware: Authenticating request...');
-    
-    // TODO: Replace with real authentication
-    // Example real implementation:
-    // try {
-    //     const idToken = req.headers.authorization?.split('Bearer ')[1];
-    //     if (!idToken) throw new Error('No token provided');
-    //     const decodedToken = await admin.auth().verifyIdToken(idToken);
-    //     const userDoc = await db.collection('users').doc(decodedToken.uid).get();
-    //     req.user = { uid: decodedToken.uid, ...userDoc.data() };
-    //     next();
-    // } catch (error) {
-    //     res.status(401).json({ success: false, error: 'Unauthorized' });
-    // }
-    
-    // Stub for development
-    req.user = {
-        uid: 'STUB_USER_ID',
-        name: 'Stub User',
-        role: 'bdm'
-    };
-    next();
-};
-
-const logActivity = async (uid, name, role, type, details, proposalId = null) => {
-    console.log(`📝 Activity Log: User ${name} (${uid}) - ${details}`);
-    
-    // TODO: Replace with real activity logging
-    // if (isFirebaseInitialized && db) {
-    //     await db.collection('activities').add({
-    //         uid, name, role, type, details, proposalId,
-    //         timestamp: admin.firestore.FieldValue.serverTimestamp()
-    //     });
-    // }
-};
-
-// Helper functions for file access control
-function canUserViewFile(file, userRole, userId) {
-    // Links and project files are viewable by all
-    if (!file.fileType || file.fileType === 'project' || file.fileType === 'link') {
-        return true;
-    }
-
-    // Estimation files have special rules
-    if (file.fileType === 'estimation') {
-        // Estimators, COO, and Directors can always view
-        if (['estimator', 'coo', 'director'].includes(userRole)) {
-            return true;
-        }
-
-        // BDM can only view estimation files for approved proposals
-        // This would need proposal status check, but for now allow all
-        return true;
-    }
-
-    return true;
-}
-
-function canUserDeleteFile(file, userRole, userId) {
-    // Users can delete their own files
-    if (file.uploadedBy === userId) {
-        return true;
-    }
-
-    // COO and Director can delete any file
-    if (['coo', 'director'].includes(userRole)) {
-        return true;
-    }
-
-    return false;
-}
-
-// --- API Route Handlers (Placeholders) ---
-const proposalsHandler = express.Router().get('/', (req, res) => res.json({ message: 'Proposals endpoint' }));
-const notificationsHandler = express.Router().get('/', (req, res) => res.json({ message: 'Notifications endpoint' }));
-const dashboardHandler = express.Router().get('/', (req, res) => res.json({ message: 'Dashboard endpoint' }));
-const activitiesHandler = express.Router().get('/', (req, res) => res.json({ message: 'Activities endpoint' }));
-const projectsHandler = express.Router().get('/', (req, res) => res.json({ message: 'Projects endpoint' }));
-const tasksHandler = express.Router().get('/', (req, res) => res.json({ message: 'Tasks endpoint' }));
-const paymentsHandler = express.Router().get('/', (req, res) => res.json({ message: 'Payments endpoint' }));
-const submissionsHandler = express.Router().get('/', (req, res) => res.json({ message: 'Submissions endpoint' }));
 
 // --- Express App Initialization ---
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Configure multer for memory storage
-const storage = multer.memoryStorage();
-const upload = multer({
-    storage: storage,
-    limits: {
-        fileSize: 50 * 1024 * 1024, // 50MB per file
-        files: 10 // Max 10 files per request
-    },
-    fileFilter: (req, file, cb) => {
-        console.log(`📎 Receiving file: ${file.originalname} (${file.mimetype})`);
-        cb(null, true); // Accept all file types
-    }
-});
-
 // --- Core Middleware ---
 
-// Security with Helmet
+// 1. Security with Helmet
 app.use(helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
     crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" }
 }));
 
-// CORS Configuration - Allow requests from multiple origins
-const allowedOrigins = [
-    'http://localhost:3000',
-    'http://localhost:5000',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:5000',
-    'https://eb-tracker-frontend-gm6qlybj1-sabins-projects-02d8db3a.vercel.app',
-    'https://eb-tracker-frontend-o4nm6wgs4-sabins-projects-02d8db3a.vercel.app',
-    // Add your production Vercel domain here when deployed
-];
+// 2. CORS Configuration - FIXED to allow Vercel preview URLs
 const corsOptions = {
     origin: function (origin, callback) {
-        console.log('🌐 CORS: Request from origin:', origin);
-                // Allow requests with no origin (like mobile apps, Postman, or same-origin)
-        if (!origin) {
-            console.log('✅ CORS: Allowing request with no origin');
+        // In development, allow all origins
+        if (!origin || process.env.NODE_ENV === 'development') {
+            console.log('CORS: Allowing development origin');
             return callback(null, true);
         }
-                // Check if origin is in allowed list
+        
+        // List of exact allowed origins
+        const allowedOrigins = [
+            'http://localhost:3000',
+            'http://localhost:5000',
+            'http://localhost:8080',
+            'https://eb-traker.vercel.app',
+            'https://eb-tracker-backend.onrender.com',
+            process.env.FRONTEND_URL
+        ].filter(Boolean);
+
+        // Check if origin exactly matches allowed origins
         if (allowedOrigins.includes(origin)) {
-            console.log('✅ CORS: Origin is in allowed list');
+            console.log('CORS: Allowed exact match origin:', origin);
             return callback(null, true);
         }
-                // Allow Claude artifact domains (*.claude.ai and *.usercontent.goog)
-        if (origin.includes('claude.ai') || origin.includes('usercontent.goog')) {
-            console.log('✅ CORS: Allowing Claude artifact domain');
+
+        // FIXED: Allow ALL Vercel preview and production URLs
+        // Vercel URLs follow patterns like:
+        // - https://your-app.vercel.app (production)
+        // - https://your-app-xyz123.vercel.app (preview)
+        // - https://your-app-git-branch-username.vercel.app (git branch)
+        if (origin.endsWith('.vercel.app')) {
+            console.log('CORS: Allowed Vercel URL:', origin);
             return callback(null, true);
         }
-                // Allow any localhost/127.0.0.1 for development
-        if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
-            console.log('✅ CORS: Allowing localhost');
-            return callback(null, true);
-        }
-                // Block all other origins
-        console.log('⚠️  CORS: Blocked request from origin:', origin);
-        callback(new Error('Not allowed by CORS'));
+
+        // Reject all other origins
+        console.log('CORS: REJECTED origin:', origin);
+        callback(new Error('This origin is not allowed by CORS'));
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    exposedHeaders: ['Content-Range', 'X-Content-Range'],
-    maxAge: 600 // Cache preflight requests for 10 minutes
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    exposedHeaders: ['Content-Range', 'X-Content-Range']
 };
 app.use(cors(corsOptions));
-// Handle preflight requests
 app.options('*', cors(corsOptions));
-console.log('✅ CORS configured with allowed origins:', allowedOrigins);
 
-// Performance & Logging
+// 3. Performance with Compression
 app.use(compression());
+
+// 4. Logging with Morgan
 app.use(process.env.NODE_ENV === 'production' ? morgan('combined') : morgan('dev'));
 
-// Body Parsing
+// 5. Body Parsing for JSON and URL-encoded data
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// --- API Routes ---
-
-// Root endpoint
+// --- Root Endpoint ---
 app.get('/', (req, res) => {
     res.json({
         message: 'EB-Tracker Backend API',
-        status: 'running',
-        firebase: isFirebaseInitialized ? 'connected' : 'disconnected',
         version: '1.0.0',
-        timestamp: new Date().toISOString()
+        status: 'running',
+        timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV || 'development',
+        endpoints: {
+            health: '/health',
+            api: '/api/*'
+        }
     });
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-    res.json({
+// --- Health Check Endpoint ---
+app.get('/health', async (req, res) => {
+    const health = {
         status: 'OK',
-        firebase: isFirebaseInitialized ? 'healthy' : 'unavailable',
+        platform: IS_RENDER ? 'Render' : 'Local',
+        timestamp: new Date().toISOString(),
         uptime: process.uptime(),
-        timestamp: new Date().toISOString()
-    });
-});
-
-// ============================================
-// FILE MANAGEMENT ENDPOINTS
-// ============================================
-
-// POST - Upload files or links
-app.post('/api/files', requireFirebase, authenticate, upload.array('files', 10), async (req, res) => {
-    console.log('\n📤 File upload request received');
-    console.log(`   User: ${req.user.uid} (${req.user.name})`);
-    console.log(`   Body:`, req.body);
-    console.log(`   Files: ${req.files ? req.files.length : 0}`);
+        environment: process.env.NODE_ENV || 'development',
+        nodeVersion: process.version
+    };
 
     try {
-        const { proposalId, fileType = 'project' } = req.body;
-        let { links } = req.body;
-
-        // Handle link uploads (no files, just URLs)
-        if (links) {
-            console.log('🔗 Processing link uploads...');
-            const parsedLinks = typeof links === 'string' ? JSON.parse(links) : links;
-            const uploadedLinks = [];
-
-            for (const link of parsedLinks) {
-                const linkDoc = {
-                    proposalId: proposalId || null,
-                    url: link.url,
-                    originalName: link.title || link.url,
-                    linkDescription: link.description || '',
-                    fileType: 'link',
-                    uploadedBy: req.user.uid,
-                    uploadedByName: req.user.name,
-                    uploadedByRole: req.user.role,
-                    uploadedAt: admin.firestore.FieldValue.serverTimestamp(),
-                };
-
-                const docRef = await db.collection('files').add(linkDoc);
-                uploadedLinks.push({ id: docRef.id, ...linkDoc });
-            }
-
-            console.log(`✅ Uploaded ${uploadedLinks.length} link(s)`);
-
-            await logActivity(
-                req.user.uid,
-                req.user.name,
-                req.user.role,
-                'file_upload',
-                `Uploaded ${uploadedLinks.length} project link(s)`,
-                proposalId
-            );
-
-            return res.json({
-                success: true,
-                message: `${uploadedLinks.length} link(s) uploaded successfully`,
-                data: uploadedLinks
-            });
-        }
-
-        // Handle file uploads
-        if (!req.files || req.files.length === 0) {
-            console.log('⚠️  No files provided');
-            return res.status(400).json({
-                success: false,
-                error: 'No files provided'
-            });
-        }
-
-        console.log(`📁 Processing ${req.files.length} file upload(s)...`);
-        const uploadedFiles = [];
-        const bucket = admin.storage().bucket();
-
-        for (const file of req.files) {
-            console.log(`   ⬆️  Uploading: ${file.originalname} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
-
-            try {
-                // Create unique filename
-                const timestamp = Date.now();
-                const sanitizedFilename = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
-                const filename = `${fileType}/${proposalId || 'general'}/${timestamp}_${sanitizedFilename}`;
-
-                // Upload to Firebase Storage
-                const fileUpload = bucket.file(filename);
-
-                await fileUpload.save(file.buffer, {
-                    metadata: {
-                        contentType: file.mimetype,
-                        metadata: {
-                            originalName: file.originalname,
-                            uploadedBy: req.user.uid,
-                            uploadedByName: req.user.name,
-                            proposalId: proposalId || 'general'
-                        }
-                    }
-                });
-
-                // Make file publicly accessible
-                await fileUpload.makePublic();
-
-                // Get public URL
-                const publicUrl = `https://storage.googleapis.com/${bucket.name}/${filename}`;
-
-                // Save metadata to Firestore
-                const fileDoc = {
-                    proposalId: proposalId || null,
-                    filename: filename,
-                    originalName: file.originalname,
-                    mimeType: file.mimetype,
-                    fileSize: file.size,
-                    url: publicUrl,
-                    fileType: fileType,
-                    uploadedBy: req.user.uid,
-                    uploadedByName: req.user.name,
-                    uploadedByRole: req.user.role,
-                    uploadedAt: admin.firestore.FieldValue.serverTimestamp(),
-                };
-
-                const docRef = await db.collection('files').add(fileDoc);
-                uploadedFiles.push({ id: docRef.id, ...fileDoc });
-
-                console.log(`   ✅ Uploaded: ${file.originalname}`);
-
-            } catch (fileError) {
-                console.error(`   ❌ Failed to upload ${file.originalname}:`, fileError.message);
-                // Continue with other files
-            }
-        }
-
-        if (uploadedFiles.length === 0) {
-            throw new Error('All file uploads failed');
-        }
-
-        console.log(`✅ Successfully uploaded ${uploadedFiles.length} file(s)\n`);
-
-        await logActivity(
-            req.user.uid,
-            req.user.name,
-            req.user.role,
-            'file_upload',
-            `Uploaded ${uploadedFiles.length} file(s)`,
-            proposalId
-        );
-
-        res.json({
-            success: true,
-            message: `${uploadedFiles.length} file(s) uploaded successfully`,
-            data: uploadedFiles
-        });
-
+        const admin = require('./api/_firebase-admin');
+        const db = admin.firestore();
+        const healthDoc = db.collection('_health').doc('check');
+        await healthDoc.set({ timestamp: new Date() });
+        await healthDoc.delete();
+        health.firebase = 'Connected';
     } catch (error) {
-        console.error('❌ File upload error:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message || 'File upload failed'
-        });
-    }
-});
-
-// GET - Retrieve files
-app.get('/api/files', requireFirebase, authenticate, async (req, res) => {
-    console.log('\n📥 File retrieval request received');
-    console.log(`   User: ${req.user.uid} (${req.user.name}, ${req.user.role})`);
-    console.log(`   Query params:`, req.query);
-
-    try {
-        const { proposalId, fileType, id } = req.query;
-
-        // Get single file by ID
-        if (id) {
-            const fileDoc = await db.collection('files').doc(id).get();
-            if (!fileDoc.exists) {
-                return res.status(404).json({
-                    success: false,
-                    error: 'File not found'
-                });
-            }
-
-            const fileData = { id: fileDoc.id, ...fileDoc.data() };
-            
-            // Add access control flags
-            fileData.canView = canUserViewFile(fileData, req.user.role, req.user.uid);
-            fileData.canDownload = fileData.canView;
-            fileData.canDelete = canUserDeleteFile(fileData, req.user.role, req.user.uid);
-
-            return res.json({
-                success: true,
-                data: fileData
-            });
-        }
-
-        // Build query
-        let query = db.collection('files');
-
-        // Filter by proposal ID if provided
-        if (proposalId) {
-            query = query.where('proposalId', '==', proposalId);
-        }
-
-        // Filter by file type if provided
-        if (fileType) {
-            query = query.where('fileType', '==', fileType);
-        }
-
-        // For BDM role, only show their own files
-        if (req.user.role === 'bdm') {
-            query = query.where('uploadedBy', '==', req.user.uid);
-        }
-
-        // Execute query
-        const snapshot = await query.orderBy('uploadedAt', 'desc').get();
-        
-        const files = [];
-        snapshot.forEach(doc => {
-            const fileData = { id: doc.id, ...doc.data() };
-            
-            // Add access control flags
-            fileData.canView = canUserViewFile(fileData, req.user.role, req.user.uid);
-            fileData.canDownload = fileData.canView;
-            fileData.canDelete = canUserDeleteFile(fileData, req.user.role, req.user.uid);
-            
-            // Only include files the user can view
-            if (fileData.canView) {
-                files.push(fileData);
-            }
-        });
-
-        console.log(`✅ Retrieved ${files.length} file(s)`);
-
-        res.json({
-            success: true,
-            data: files
-        });
-
-    } catch (error) {
-        console.error('❌ File retrieval error:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message || 'Failed to retrieve files'
-        });
-    }
-});
-
-// DELETE - Delete file
-app.delete('/api/files', requireFirebase, authenticate, async (req, res) => {
-    console.log('\n🗑️ File deletion request received');
-    console.log(`   User: ${req.user.uid} (${req.user.name}, ${req.user.role})`);
-    console.log(`   Query params:`, req.query);
-
-    try {
-        const { id } = req.query;
-
-        if (!id) {
-            return res.status(400).json({
-                success: false,
-                error: 'File ID is required'
-            });
-        }
-
-        // Get file metadata
-        const fileDoc = await db.collection('files').doc(id).get();
-        
-        if (!fileDoc.exists) {
-            return res.status(404).json({
-                success: false,
-                error: 'File not found'
-            });
-        }
-
-        const fileData = fileDoc.data();
-
-        // Check if user can delete this file
-        if (!canUserDeleteFile({ ...fileData, id }, req.user.role, req.user.uid)) {
-            return res.status(403).json({
-                success: false,
-                error: 'You do not have permission to delete this file'
-            });
-        }
-
-        // Delete from Storage if it's not a link
-        if (fileData.fileType !== 'link' && fileData.filename) {
-            try {
-                const bucket = admin.storage().bucket();
-                await bucket.file(fileData.filename).delete();
-                console.log(`✅ Deleted from Storage: ${fileData.filename}`);
-            } catch (storageError) {
-                console.warn(`⚠️ Storage deletion failed (file may not exist):`, storageError.message);
-            }
-        }
-
-        // Delete from Firestore
-        await db.collection('files').doc(id).delete();
-        console.log(`✅ Deleted from Firestore: ${id}`);
-
-        await logActivity(
-            req.user.uid,
-            req.user.name,
-            req.user.role,
-            'file_delete',
-            `Deleted file: ${fileData.originalName}`,
-            fileData.proposalId
-        );
-
-        res.json({
-            success: true,
-            message: 'File deleted successfully'
-        });
-
-    } catch (error) {
-        console.error('❌ File deletion error:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message || 'Failed to delete file'
-        });
-    }
-});
-
-// Test file upload endpoint
-app.post('/api/files/test', requireFirebase, authenticate, upload.single('testFile'), async (req, res) => {
-    console.log('🧪 Test file upload endpoint');
-    console.log('   File:', req.file ? req.file.originalname : 'none');
-    console.log('   Body:', req.body);
-
-    if (!req.file) {
-        return res.json({
-            success: false,
-            message: 'No file received',
-            body: req.body
-        });
+        console.error("Health check Firebase error:", error.message);
+        health.firebase = 'Error: ' + error.message;
+        health.status = 'Degraded';
     }
 
-    res.json({
-        success: true,
-        message: 'Test file received successfully',
-        file: {
-            originalname: req.file.originalname,
-            mimetype: req.file.mimetype,
-            size: req.file.size,
-            sizeFormatted: `${(req.file.size / 1024 / 1024).toFixed(2)} MB`
-        }
-    });
+    res.status(health.status === 'OK' ? 200 : 503).json(health);
 });
 
-// Mount API routers
+// --- API Routes ---
 const apiRouter = express.Router();
+
 apiRouter.use('/proposals', proposalsHandler);
 apiRouter.use('/notifications', notificationsHandler);
 apiRouter.use('/dashboard', dashboardHandler);
 apiRouter.use('/activities', activitiesHandler);
+apiRouter.use('/files', filesHandler);
 apiRouter.use('/projects', projectsHandler);
 apiRouter.use('/tasks', tasksHandler);
 apiRouter.use('/payments', paymentsHandler);
 apiRouter.use('/submissions', submissionsHandler);
+
 app.use('/api', apiRouter);
 
-// --- Error Handling Middleware ---
+// --- Platform-Specific Features (Cron Jobs) ---
+if ((IS_RENDER || IS_LOCAL) && process.env.ENABLE_CRON_JOBS === 'true' && cronJobs) {
+    cronJobs.startCronJobs();
+    console.log('✓ Cron jobs initialized and started.');
+}
 
-// Multer error handler
-app.use((error, req, res, next) => {
-    if (error instanceof multer.MulterError) {
-        console.error('Multer error:', error.code);
-        if (error.code === 'LIMIT_FILE_SIZE') {
-            return res.status(413).json({
-                success: false,
-                error: 'File too large. Maximum size is 50MB per file.'
-            });
-        }
-        if (error.code === 'LIMIT_FILE_COUNT') {
-            return res.status(400).json({
-                success: false,
-                error: 'Too many files. Maximum is 10 files per request.'
-            });
-        }
-        return res.status(400).json({
-            success: false,
-            error: `File upload error: ${error.message}`
-        });
-    }
-    next(error);
-});
-
-// 404 Not Found
-app.use((req, res) => {
+// --- Error Handling ---
+app.use((req, res, next) => {
     res.status(404).json({
         success: false,
-        error: 'Endpoint not found',
-        path: req.path
+        error: 'API endpoint not found',
+        path: req.path,
+        method: req.method
     });
 });
 
-// General error handler
 app.use((err, req, res, next) => {
-    console.error('❌ Unhandled error:', err.stack);
-    res.status(500).json({
+    console.error('Unhandled Error:', {
+        message: err.message,
+        stack: err.stack,
+        url: req.originalUrl,
+        method: req.method,
+    });
+
+    const isProduction = process.env.NODE_ENV === 'production';
+    res.status(err.status || 500).json({
         success: false,
-        error: 'Internal server error',
-        message: process.env.NODE_ENV === 'development' ? err.message : undefined
+        error: isProduction ? 'An internal server error occurred.' : err.message,
+        ...( !isProduction && { stack: err.stack } )
     });
 });
 
 // --- Server Startup ---
-const server = app.listen(PORT, () => {
-    console.log('\n╔═══════════════════════════════════════════════════════════╗');
-    console.log('║               EB-TRACKER BACKEND SERVER               ║');
-    console.log('╠═══════════════════════════════════════════════════════════╣');
-    console.log(`║  Status:      🟢 RUNNING                                  ║`);
-    console.log(`║  Port:        ${PORT.toString().padEnd(44)}║`);
-    console.log(`║  Environment: ${(process.env.NODE_ENV || 'development').padEnd(44)}║`);
-    console.log(`║  Firebase:    ${(isFirebaseInitialized ? '🟢 Connected' : '🔴 Disconnected').padEnd(44)}║`);
-    console.log('╠═══════════════════════════════════════════════════════════╣');
-    console.log(`║  Local:       http://localhost:${PORT.toString().padEnd(31)}║`);
-    console.log(`║  Health:      http://localhost:${PORT}/health`.padEnd(60) + '║');
-    console.log('╚═══════════════════════════════════════════════════════════╝\n');
+const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log('╔═══════════════════════════════════════╗');
+    console.log('║       EB-Tracker Server Started        ║');
+    console.log('╠═══════════════════════════════════════╣');
+    console.log(`║ Platform:    ${IS_RENDER ? 'Render' : 'Local'}                ║`);
+    console.log(`║ Port:        ${PORT}                       ║`);
+    console.log(`║ Environment: ${process.env.NODE_ENV || 'development'}           ║`);
+    console.log(`║ Cron Jobs:   ${process.env.ENABLE_CRON_JOBS === 'true' && cronJobs ? 'Enabled' : 'Disabled'}             ║`);
+    console.log('╚═══════════════════════════════════════╝');
+    console.log('');
+    console.log('Server ready to accept connections');
+    console.log(`Health check: http://localhost:${PORT}/health`);
+    console.log(`API endpoint: http://localhost:${PORT}/api/`);
+    console.log('');
+    console.log('CORS: Allowing all *.vercel.app domains');
 });
 
-// Graceful shutdown
+// --- Graceful Shutdown ---
 process.on('SIGTERM', () => {
-    console.log('\n🛑 SIGTERM signal received. Closing server gracefully...');
+    console.log('SIGTERM signal received. Closing HTTP server.');
+    if ((IS_RENDER || IS_LOCAL) && cronJobs) {
+        cronJobs.stopCronJobs();
+        console.log('Cron jobs stopped.');
+    }
     server.close(() => {
-        console.log('✅ HTTP server closed');
-        if (isFirebaseInitialized) {
-            admin.app().delete().then(() => {
-                console.log('✅ Firebase connection closed');
-                process.exit(0);
-            });
-        } else {
-            process.exit(0);
-        }
+        console.log('HTTP server closed. Exiting process.');
+        process.exit(0);
     });
 });
 
 process.on('SIGINT', () => {
-    console.log('\n🛑 SIGINT signal received. Closing server gracefully...');
+    console.log('SIGINT signal received. Closing HTTP server.');
+    if ((IS_RENDER || IS_LOCAL) && cronJobs) {
+        cronJobs.stopCronJobs();
+        console.log('Cron jobs stopped.');
+    }
     server.close(() => {
-        console.log('✅ Server shut down successfully');
+        console.log('HTTP server closed. Exiting process.');
         process.exit(0);
     });
 });

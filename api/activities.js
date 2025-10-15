@@ -1,3 +1,4 @@
+// api/activities.js - Complete activities handler
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
@@ -40,7 +41,6 @@ const handler = async (req, res) => {
                 query = query.where('proposalId', '==', proposalId);
             } else if (userRole === 'bdm') {
                 // For BDMs viewing all activities, filter to only their proposals
-                // First get all their proposal IDs
                 const proposalsSnapshot = await db.collection('proposals')
                     .where('createdByUid', '==', userUid)
                     .get();
@@ -50,13 +50,12 @@ const handler = async (req, res) => {
                     return res.status(200).json({ success: true, data: [] });
                 }
                 
-                // Then filter activities to only those proposals
-                // Note: Firestore 'in' operator supports max 10 items, so we need to handle this differently
+                // Firestore 'in' operator supports max 10 items
                 if (proposalIds.length <= 10) {
                     query = query.where('proposalId', 'in', proposalIds);
                 } else {
-                    // For more than 10 proposals, we'll filter after fetching
-                    const snapshot = await query.limit(parseInt(limit) * 2).get(); // Fetch more to account for filtering
+                    // For more than 10 proposals, fetch more and filter
+                    const snapshot = await query.limit(parseInt(limit) * 2).get();
                     const activities = snapshot.docs
                         .map(doc => ({ id: doc.id, ...doc.data() }))
                         .filter(activity => proposalIds.includes(activity.proposalId))

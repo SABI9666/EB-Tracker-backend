@@ -16,13 +16,42 @@ app.use(helmet());
 app.use(compression());
 app.use(morgan('dev'));
 
-// CORS - Allow all origins
+// CORS - FIXED CONFIGURATION
+// Option 1: Allow all origins WITHOUT credentials (simpler, works for most cases)
 app.use(cors({
     origin: '*',
+    credentials: false,  // ✅ Changed to false when using origin: '*'
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+}));
+
+// OR Option 2: Allow specific origins WITH credentials (more secure)
+/*
+app.use(cors({
+    origin: function(origin, callback) {
+        // Allow requests with no origin (mobile apps, Postman, etc.)
+        if (!origin) return callback(null, true);
+        
+        // List of allowed origins
+        const allowedOrigins = [
+            'http://localhost:3000',
+            'http://localhost:5500',
+            'http://127.0.0.1:5500',
+            'https://your-frontend-domain.com'
+        ];
+        
+        if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(null, true); // Allow all for development
+            // callback(new Error('Not allowed by CORS')); // Strict mode
+        }
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
+*/
 
 // Handle preflight for all routes
 app.options('*', cors());

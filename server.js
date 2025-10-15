@@ -1,4 +1,4 @@
-// server.js - Main backend entry point for Render deployment
+// server.js - Complete backend entry point
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -16,7 +16,7 @@ app.use(helmet());
 app.use(compression());
 app.use(morgan('dev'));
 
-// CORS Configuration - Allow all origins for now
+// CORS - Allow all origins
 app.use(cors({
     origin: '*',
     credentials: true,
@@ -24,12 +24,21 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
+// Handle preflight for all routes
+app.options('*', cors());
+
 // Body parsing
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Request logging
+app.use((req, res, next) => {
+    console.log(`📥 ${req.method} ${req.path}`);
+    next();
+});
 
 // ============================================
-// HEALTH CHECK ENDPOINT
+// HEALTH CHECK
 // ============================================
 app.get('/health', (req, res) => {
     const admin = require('./api/_firebase-admin');
@@ -45,42 +54,76 @@ app.get('/', (req, res) => {
     res.json({ 
         message: 'EBTracker Backend API',
         version: '1.0.0',
+        status: 'running',
         endpoints: [
-            '/health - Health check',
-            '/api/proposals - Proposals management',
-            '/api/files - File management',
-            '/api/dashboard - Dashboard data',
-            '/api/activities - Activity log'
+            'GET  /health - Health check',
+            'GET  /api/proposals - List all proposals',
+            'POST /api/proposals - Create proposal',
+            'GET  /api/dashboard - Dashboard data',
+            'GET  /api/files - List files',
+            'POST /api/files - Upload files',
+            'GET  /api/activities - Activity log',
+            'GET  /api/tasks - List tasks',
+            'GET  /api/submissions - List submissions',
+            'GET  /api/payments - List payments',
+            'GET  /api/notifications - List notifications',
+            'GET  /api/projects - List projects'
         ]
     });
 });
 
 // ============================================
-// API ROUTES
+// API ROUTES - Import handlers
 // ============================================
-app.use('/api/proposals', require('./api/proposals'));
-app.use('/api/files', require('./api/files'));
-app.use('/api/dashboard', require('./api/dashboard'));
-app.use('/api/activities', require('./api/activities'));
-app.use('/api/tasks', require('./api/tasks'));
-app.use('/api/submissions', require('./api/submissions'));
-app.use('/api/payments', require('./api/payments'));
-app.use('/api/notifications', require('./api/notifications'));
-app.use('/api/projects', require('./api/projects'));
+console.log('📦 Loading API routes...');
+
+try {
+    // Load all route handlers
+    const proposalsHandler = require('./api/proposals');
+    const filesHandler = require('./api/files');
+    const dashboardHandler = require('./api/dashboard');
+    const activitiesHandler = require('./api/activities');
+    const tasksHandler = require('./api/tasks');
+    const submissionsHandler = require('./api/submissions');
+    const paymentsHandler = require('./api/payments');
+    const notificationsHandler = require('./api/notifications');
+    const projectsHandler = require('./api/projects');
+    
+    console.log('✅ All handlers loaded successfully');
+    
+    // Register routes
+    app.use('/api/proposals', proposalsHandler);
+    app.use('/api/files', filesHandler);
+    app.use('/api/dashboard', dashboardHandler);
+    app.use('/api/activities', activitiesHandler);
+    app.use('/api/tasks', tasksHandler);
+    app.use('/api/submissions', submissionsHandler);
+    app.use('/api/payments', paymentsHandler);
+    app.use('/api/notifications', notificationsHandler);
+    app.use('/api/projects', projectsHandler);
+    
+    console.log('✅ All routes registered');
+    
+} catch (error) {
+    console.error('❌ Error loading routes:', error);
+    console.error('Stack:', error.stack);
+}
 
 // ============================================
 // ERROR HANDLING
 // ============================================
 app.use((req, res) => {
+    console.log(`❌ 404 - Route not found: ${req.method} ${req.path}`);
     res.status(404).json({ 
         success: false, 
         error: 'Endpoint not found',
-        path: req.path 
+        path: req.path,
+        method: req.method
     });
 });
 
 app.use((err, req, res, next) => {
-    console.error('Server error:', err);
+    console.error('❌ Server error:', err);
     res.status(500).json({ 
         success: false, 
         error: 'Internal Server Error',
@@ -89,12 +132,25 @@ app.use((err, req, res, next) => {
 });
 
 // ============================================
-// START SERVER
+// GRACEFUL SHUTDOWN
 // ============================================
-app.listen(PORT, () => {
-    console.log(`✅ Server running on port ${PORT}`);
-    console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`🔥 Firebase: ${require('./api/_firebase-admin').apps.length > 0 ? 'Initialized' : 'Not initialized'}`);
+const server = app.listen(PORT, () => {
+    console.log('');
+    console.log('═══════════════════════════════════════');
+    console.log('✅ Server running on port', PORT);
+    console.log('📍 Environment:', process.env.NODE_ENV || 'development');
+    const admin = require('./api/_firebase-admin');
+    console.log('🔥 Firebase:', admin.apps.length > 0 ? 'Initialized' : 'Not initialized');
+    console.log('═══════════════════════════════════════');
+    console.log('');
+});
+
+process.on('SIGTERM', () => {
+    console.log('SIGTERM signal received. Closing HTTP server.');
+    server.close(() => {
+        console.log('HTTP server closed. Exiting process.');
+        process.exit(0);
+    });
 });
 
 module.exports = app;

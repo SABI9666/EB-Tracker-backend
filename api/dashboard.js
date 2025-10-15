@@ -1,3 +1,4 @@
+// api/dashboard.js - Complete dashboard handler
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
@@ -9,6 +10,7 @@ const allowCors = fn => async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization');
+    
     if (req.method === 'OPTIONS') {
         res.status(200).end();
         return;
@@ -17,11 +19,19 @@ const allowCors = fn => async (req, res) => {
 };
 
 const handler = async (req, res) => {
+    console.log('📊 Dashboard request received');
+    console.log('   Method:', req.method);
+    console.log('   Headers:', req.headers.authorization ? 'Token present' : 'No token');
+    
     if (req.method === 'GET') {
         try {
+            // Verify authentication
             await util.promisify(verifyToken)(req, res);
+            
             const userRole = req.user.role;
             const userUid = req.user.uid;
+            
+            console.log('   User:', req.user.name, '- Role:', userRole);
 
             // For BDMs, filter proposals to only their own
             let proposalsQuery = db.collection('proposals');
@@ -31,7 +41,10 @@ const handler = async (req, res) => {
             
             const proposalsSnapshot = await proposalsQuery.get();
             const proposals = proposalsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            
+            console.log('   Proposals found:', proposals.length);
 
+            // Calculate statistics
             const wonProposals = proposals.filter(p => p.status === 'submitted_to_client' || p.status === 'won');
             const totalWonValue = wonProposals.reduce((sum, p) => sum + (p.pricing?.quoteValue || 0), 0);
             const totalProposalsCount = proposals.length;
@@ -40,23 +53,20 @@ const handler = async (req, res) => {
             const pipelineValue = proposals.filter(p => !['submitted_to_client', 'won', 'rejected', 'lost'].includes(p.status))
                                          .reduce((sum, p) => sum + (p.pricing?.quoteValue || 0), 0);
 
+            // Get action items based on role
             let actionItemsQuery;
             switch(userRole) {
                 case 'estimator':
-                    // Estimators see all proposals needing estimation
                     actionItemsQuery = db.collection('proposals')
                         .where('status', 'in', ['pending_estimation', 'revision_required']);
                     break;
                 case 'coo':
-                    // COOs see all proposals needing pricing
                     actionItemsQuery = db.collection('proposals').where('status', '==', 'pending_pricing');
                     break;
                 case 'director':
-                    // Directors see all proposals needing approval
                     actionItemsQuery = db.collection('proposals').where('status', '==', 'pending_director_approval');
                     break;
                 case 'bdm':
-                    // BDMs only see their own approved proposals or revision required
                     actionItemsQuery = db.collection('proposals')
                         .where('createdByUid', '==', userUid)
                         .where('status', 'in', ['approved', 'revision_required']);
@@ -87,20 +97,21 @@ const handler = async (req, res) => {
                 });
             }
 
-            // Filter activities based on user role
+            // Get recent activities (filtered for BDMs)
             let activitiesQuery = db.collection('activities').orderBy('timestamp', 'desc').limit(5);
             if (userRole === 'bdm') {
-                // BDMs only see activities related to their proposals
                 const proposalIds = proposals.map(p => p.id);
                 if (proposalIds.length > 0) {
-                    activitiesQuery = activitiesQuery.where('proposalId', 'in', proposalIds);
+                    activitiesQuery = activitiesQuery.where('proposalId', 'in', proposalIds.slice(0, 10));
                 }
             }
             
             const activitiesSnapshot = await activitiesQuery.get();
             const recentActivities = activitiesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             
+            // Build dashboard data based on role
             let dashboardData = {};
+            
             if (userRole === 'director') {
                 // Directors see all data
                 const allProposalsSnapshot = await db.collection('proposals').get();
@@ -139,7 +150,7 @@ const handler = async (req, res) => {
                     recentActivities
                 };
             } else {
-                // Estimators and COOs see aggregate data but filtered action items
+                // Estimators and COOs see aggregate data
                 dashboardData = {
                     stats: {
                         'Active Proposals': proposals.filter(p => !['won','lost','rejected'].includes(p.status)).length,
@@ -152,11 +163,16 @@ const handler = async (req, res) => {
                 };
             }
 
+            console.log('✅ Dashboard data prepared');
             return res.status(200).json({ success: true, data: dashboardData });
 
         } catch (error) {
-            console.error('Dashboard API error:', error);
-            return res.status(500).json({ success: false, error: 'Internal Server Error', message: error.message });
+            console.error('❌ Dashboard API error:', error);
+            return res.status(500).json({ 
+                success: false, 
+                error: 'Internal Server Error', 
+                message: error.message 
+            });
         }
     } else {
         return res.status(405).json({ success: false, error: 'Method not allowed' });

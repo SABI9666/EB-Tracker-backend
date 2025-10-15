@@ -1,15 +1,16 @@
-// api/dashboard.js - Complete dashboard handler
+// api/dashboard.js - Complete dashboard handler with FIXED CORS
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
 
 const db = admin.firestore();
 
+// ✅ FIXED CORS CONFIGURATION
 const allowCors = fn => async (req, res) => {
-    res.setHeader('Access-Control-Allow-Credentials', false); 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization');
+    // ✅ Removed credentials header - this was causing CORS to fail!
     
     if (req.method === 'OPTIONS') {
         res.status(200).end();

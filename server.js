@@ -96,7 +96,8 @@ app.get('/', (req, res) => {
             'GET  /api/submissions - List submissions',
             'GET  /api/payments - List payments',
             'GET  /api/notifications - List notifications',
-            'GET  /api/projects - List projects'
+            'GET  /api/projects - List projects',
+            'GET  /api/users - List users'
         ]
     });
 });
@@ -117,7 +118,8 @@ try {
     const paymentsHandler = require('./api/payments');
     const notificationsHandler = require('./api/notifications');
     const projectsHandler = require('./api/projects');
-    const deliverablesHandler = require('./api/deliverables'); // Added handler
+    const deliverablesHandler = require('./api/deliverables');
+    const usersHandler = require('./api/users'); // New handler import
 
     console.log('✅ All handlers loaded successfully');
 
@@ -126,12 +128,13 @@ try {
     app.use('/api/projects', projectsHandler);
     app.use('/api/tasks', tasksHandler);
     app.use('/api/files', filesHandler);
-    app.use('/api/deliverables', deliverablesHandler); // ✅ ADDED THIS NEW LINE
+    app.use('/api/deliverables', deliverablesHandler);
     app.use('/api/notifications', notificationsHandler);
     app.use('/api/activities', activitiesHandler);
     app.use('/api/dashboard', dashboardHandler);
     app.use('/api/submissions', submissionsHandler);
     app.use('/api/payments', paymentsHandler);
+    app.use('/api/users', usersHandler); // New route registration
 
     console.log('✅ All routes registered');
 

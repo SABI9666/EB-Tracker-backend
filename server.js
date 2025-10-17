@@ -20,7 +20,7 @@ app.use(morgan('dev'));
 // Option 1: Allow all origins WITHOUT credentials (simpler, works for most cases)
 app.use(cors({
     origin: '*',
-    credentials: false,  // ✅ Changed to false when using origin: '*'
+    credentials: false, // ✅ Changed to false when using origin: '*'
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
@@ -71,7 +71,7 @@ app.use((req, res, next) => {
 // ============================================
 app.get('/health', (req, res) => {
     const admin = require('./api/_firebase-admin');
-    res.json({ 
+    res.json({
         status: 'OK',
         message: 'Backend running',
         firebase: admin.apps.length > 0 ? 'Connected' : 'Not initialized',
@@ -80,7 +80,7 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.json({ 
+    res.json({
         message: 'EBTracker Backend API',
         version: '1.0.0',
         status: 'running',
@@ -117,22 +117,24 @@ try {
     const paymentsHandler = require('./api/payments');
     const notificationsHandler = require('./api/notifications');
     const projectsHandler = require('./api/projects');
-    
+    const deliverablesHandler = require('./api/deliverables'); // Added handler
+
     console.log('✅ All handlers loaded successfully');
-    
+
     // Register routes
     app.use('/api/proposals', proposalsHandler);
-    app.use('/api/files', filesHandler);
-    app.use('/api/dashboard', dashboardHandler);
-    app.use('/api/activities', activitiesHandler);
+    app.use('/api/projects', projectsHandler);
     app.use('/api/tasks', tasksHandler);
+    app.use('/api/files', filesHandler);
+    app.use('/api/deliverables', deliverablesHandler); // ✅ ADDED THIS NEW LINE
+    app.use('/api/notifications', notificationsHandler);
+    app.use('/api/activities', activitiesHandler);
+    app.use('/api/dashboard', dashboardHandler);
     app.use('/api/submissions', submissionsHandler);
     app.use('/api/payments', paymentsHandler);
-    app.use('/api/notifications', notificationsHandler);
-    app.use('/api/projects', projectsHandler);
-    
+
     console.log('✅ All routes registered');
-    
+
 } catch (error) {
     console.error('❌ Error loading routes:', error);
     console.error('Stack:', error.stack);
@@ -143,8 +145,8 @@ try {
 // ============================================
 app.use((req, res) => {
     console.log(`❌ 404 - Route not found: ${req.method} ${req.path}`);
-    res.status(404).json({ 
-        success: false, 
+    res.status(404).json({
+        success: false,
         error: 'Endpoint not found',
         path: req.path,
         method: req.method
@@ -153,8 +155,8 @@ app.use((req, res) => {
 
 app.use((err, req, res, next) => {
     console.error('❌ Server error:', err);
-    res.status(500).json({ 
-        success: false, 
+    res.status(500).json({
+        success: false,
         error: 'Internal Server Error',
         message: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
     });

@@ -1,4 +1,4 @@
-// api/proposals.js - Complete Proposals API Handler
+// api/proposals.js - FIXED VERSION with proper design_lead filtering
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
@@ -22,7 +22,7 @@ const handler = async (req, res) => {
     try {
         await util.promisify(verifyToken)(req, res);
 
-        // FIX: Manually parse JSON body for POST/PUT requests if the server environment hasn't.
+        // Parse JSON body for POST/PUT
         if ((req.method === 'POST' || req.method === 'PUT') && req.headers['content-type'] === 'application/json') {
             if (!req.body || Object.keys(req.body).length === 0) {
                 await new Promise((resolve) => {
@@ -57,27 +57,137 @@ const handler = async (req, res) => {
                 
                 const proposalData = doc.data();
                 
-                // BDM isolation: Check if BDM can access this proposal
+                // BDM isolation
                 if (req.user.role === 'bdm' && proposalData.createdByUid !== req.user.uid) {
                     return res.status(403).json({ 
                         success: false, 
                         error: 'Access denied. You can only view your own proposals.' 
                     });
                 }
+
+                // FIXED: Design Lead isolation - only see proposals that became their projects
+                if (req.user.role === 'design_lead') {
+                    if (!proposalData.projectCreated || !proposalData.projectId) {
+                        return res.status(403).json({ 
+                            success: false, 
+                            error: 'This proposal has not been converted to a project yet.' 
+                        });
+                    }
+                    
+                    // Check if the project is allocated to this design lead
+                    const projectDoc = await db.collection('projects').doc(proposalData.projectId).get();
+                    if (!projectDoc.exists || projectDoc.data().designLeadUid !== req.user.uid) {
+                        return res.status(403).json({ 
+                            success: false, 
+                            error: 'This proposal is not allocated to you.' 
+                        });
+                    }
+                }
+
+                // FIXED: Designer isolation - only see proposals for projects they're assigned to
+                if (req.user.role === 'designer') {
+                    if (!proposalData.projectCreated || !proposalData.projectId) {
+                        return res.status(403).json({ 
+                            success: false, 
+                            error: 'This proposal has not been converted to a project yet.' 
+                        });
+                    }
+                    
+                    // Check if designer is assigned to this project
+                    const projectDoc = await db.collection('projects').doc(proposalData.projectId).get();
+                    if (!projectDoc.exists || !(projectDoc.data().assignedDesignerUids || []).includes(req.user.uid)) {
+                        return res.status(403).json({ 
+                            success: false, 
+                            error: 'This proposal is not assigned to you.' 
+                        });
+                    }
+                }
                 
                 return res.status(200).json({ success: true, data: { id: doc.id, ...proposalData } });
             }
             
-            // Get all proposals with BDM isolation
-            let query = db.collection('proposals').orderBy('createdAt', 'desc');
-            
+            // Get all proposals with role-based filtering
+            let proposals = [];
+
             // BDMs only see their own proposals
             if (req.user.role === 'bdm') {
-                query = query.where('createdByUid', '==', req.user.uid);
+                const query = db.collection('proposals')
+                    .where('createdByUid', '==', req.user.uid)
+                    .orderBy('createdAt', 'desc');
+                const snapshot = await query.get();
+                proposals = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            }
+            // FIXED: Design Leads only see proposals that became projects allocated to them
+            else if (req.user.role === 'design_lead') {
+                // First, get all projects allocated to this design lead
+                const projectsSnapshot = await db.collection('projects')
+                    .where('designLeadUid', '==', req.user.uid)
+                    .get();
+                
+                const proposalIds = projectsSnapshot.docs
+                    .map(doc => doc.data().proposalId)
+                    .filter(id => id); // Remove null/undefined
+
+                if (proposalIds.length > 0) {
+                    // Firestore 'in' queries limited to 10 items, so we batch
+                    const batchSize = 10;
+                    for (let i = 0; i < proposalIds.length; i += batchSize) {
+                        const batch = proposalIds.slice(i, i + batchSize);
+                        const proposalsSnapshot = await db.collection('proposals')
+                            .where(admin.firestore.FieldPath.documentId(), 'in', batch)
+                            .get();
+                        
+                        proposals.push(...proposalsSnapshot.docs.map(doc => ({ 
+                            id: doc.id, 
+                            ...doc.data() 
+                        })));
+                    }
+                    // Sort by createdAt desc
+                    proposals.sort((a, b) => {
+                        const aTime = a.createdAt?.seconds || 0;
+                        const bTime = b.createdAt?.seconds || 0;
+                        return bTime - aTime;
+                    });
+                }
+            }
+            // FIXED: Designers only see proposals for projects they're assigned to
+            else if (req.user.role === 'designer') {
+                // First, get all projects assigned to this designer
+                const projectsSnapshot = await db.collection('projects')
+                    .where('assignedDesignerUids', 'array-contains', req.user.uid)
+                    .get();
+                
+                const proposalIds = projectsSnapshot.docs
+                    .map(doc => doc.data().proposalId)
+                    .filter(id => id);
+
+                if (proposalIds.length > 0) {
+                    const batchSize = 10;
+                    for (let i = 0; i < proposalIds.length; i += batchSize) {
+                        const batch = proposalIds.slice(i, i + batchSize);
+                        const proposalsSnapshot = await db.collection('proposals')
+                            .where(admin.firestore.FieldPath.documentId(), 'in', batch)
+                            .get();
+                        
+                        proposals.push(...proposalsSnapshot.docs.map(doc => ({ 
+                            id: doc.id, 
+                            ...doc.data() 
+                        })));
+                    }
+                    proposals.sort((a, b) => {
+                        const aTime = a.createdAt?.seconds || 0;
+                        const bTime = b.createdAt?.seconds || 0;
+                        return bTime - aTime;
+                    });
+                }
+            }
+            // COO, Director, Estimator, Accounts see all proposals
+            else {
+                const query = db.collection('proposals').orderBy('createdAt', 'desc');
+                const snapshot = await query.get();
+                proposals = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             }
             
-            const snapshot = await query.get();
-            const proposals = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             return res.status(200).json({ success: true, data: proposals });
         }
 
@@ -139,7 +249,6 @@ const handler = async (req, res) => {
                 clientCompany
             });
             
-            // Return new proposal with its ID for file linking on frontend
             return res.status(201).json({ 
                 success: true, 
                 data: { id: docRef.id, ...newProposal },
@@ -173,7 +282,7 @@ const handler = async (req, res) => {
             
             const proposal = proposalDoc.data();
             
-            // BDM isolation: Check if BDM can modify this proposal
+            // BDM isolation
             if (req.user.role === 'bdm' && proposal.createdByUid !== req.user.uid) {
                 return res.status(403).json({ 
                     success: false, 
@@ -184,172 +293,89 @@ const handler = async (req, res) => {
             let updates = {};
             let activityDetail = '';
 
-            // ============================================
-            // Handle different actions
-            // ============================================
             switch (action) {
                 case 'add_links':
                     updates = { 
                         projectLinks: data.links || [],
                         updatedAt: admin.firestore.FieldValue.serverTimestamp()
                     };
-                    activityDetail = `Added ${data.links?.length || 0} project links`;
+                    activityDetail = `Project links added`;
                     break;
                     
                 case 'add_estimation':
-                    // Only estimators can add estimation
-                    if (req.user.role !== 'estimator') {
+                    if (!['estimator', 'coo'].includes(req.user.role)) {
                         return res.status(403).json({ 
                             success: false, 
-                            error: 'Only estimators can add estimation' 
+                            error: 'Only Estimator or COO can add estimation' 
                         });
                     }
                     
-                    updates = { 
-                        status: 'pending_pricing',
-                        estimation: { 
-                            ...data, 
-                            estimatedBy: req.user.name, 
-                            estimatedAt: new Date().toISOString() 
-                        }
+                    updates = {
+                        estimation: {
+                            manhours: data.manhours || 0,
+                            boqUploaded: data.boqUploaded || false,
+                            estimatorName: req.user.name,
+                            estimatedAt: new Date().toISOString(),
+                            notes: data.notes || ''
+                        },
+                        status: 'estimation_complete'
                     };
-                    activityDetail = `Estimation added: ${data.totalHours} hours`;
+                    activityDetail = `Estimation completed: ${data.manhours} manhours`;
                     
-                    // Notify COO
                     await db.collection('notifications').add({
-                        type: 'estimation_completed',
+                        type: 'estimation_complete',
                         recipientRole: 'coo',
                         proposalId: id,
-                        message: `Estimation completed for ${proposal.projectName} - ${data.totalHours} hours`,
+                        message: `Estimation completed for ${proposal.projectName}`,
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         isRead: false
                     });
                     break;
                     
-                case 'set_pricing':
-                    // Only COO can set pricing
-                    if (req.user.role !== 'coo') {
+                case 'add_pricing':
+                    if (!['coo'].includes(req.user.role)) {
                         return res.status(403).json({ 
                             success: false, 
-                            error: 'Only COO can set pricing' 
+                            error: 'Only COO can add pricing' 
                         });
                     }
                     
-                    updates = { 
-                        status: 'pending_director_approval',
-                        pricing: { 
-                            ...data, 
-                            pricedBy: req.user.name, 
-                            pricedAt: new Date().toISOString() 
-                        }
-                    };
-                    
-                    // If COO updated the services, apply the change
-                    if (data.updatedServices) {
-                        updates['estimation.services'] = data.updatedServices;
-                    }
-                    
-                    activityDetail = `Pricing set: ${data.currency || 'USD'} ${data.quoteValue}`;
-                    
-                    // Notify Director
-                    await db.collection('notifications').add({
-                        type: 'pricing_set',
-                        recipientRole: 'director',
-                        proposalId: id,
-                        message: `Pricing set for ${proposal.projectName} - Awaiting approval`,
-                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                        isRead: false
-                    });
-                    break;
-                    
-                case 'director_approve':
-                    // Only director can approve
-                    if (req.user.role !== 'director') {
-                        return res.status(403).json({ 
-                            success: false, 
-                            error: 'Only Director can approve proposals' 
-                        });
-                    }
-                    
-                    updates = { 
-                        status: 'approved', 
-                        directorApproval: { 
-                            approved: true, 
-                            ...data, 
-                            approvedBy: req.user.name, 
-                            approvedAt: new Date().toISOString(),
-                            comments: data.comments || ''
-                        } 
-                    };
-                    activityDetail = `Director approved proposal${data.comments ? ': ' + data.comments : ''}`;
-                    
-                    // Notify stakeholders
-                    const stakeholders = ['bdm', 'estimator', 'coo'];
-                    for (const role of stakeholders) {
-                        await db.collection('notifications').add({
-                            type: 'proposal_approved',
-                            recipientRole: role,
-                            recipientUid: role === 'bdm' ? proposal.createdByUid : null,
-                            proposalId: id,
-                            message: `${proposal.projectName} has been approved by Director`,
-                            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                            isRead: false
-                        });
-                    }
-                    break;
-                    
-                case 'director_reject':
-                    // Only director can reject
-                    if (req.user.role !== 'director') {
-                        return res.status(403).json({ 
-                            success: false, 
-                            error: 'Only Director can reject proposals' 
-                        });
-                    }
-                    
-                    updates = { 
-                        status: 'revision_required',
-                        directorApproval: { 
-                            approved: false, 
-                            ...data, 
-                            rejectedBy: req.user.name, 
-                            rejectedAt: new Date().toISOString(),
-                            comments: data.comments || '',
-                            requiresRevisionBy: data.requiresRevisionBy || 'estimator'
-                        } 
-                    };
-                    activityDetail = `Director requested revision: ${data.comments}`;
-                    
-                    // Notify the person who needs to revise
-                    await db.collection('notifications').add({
-                        type: 'revision_required',
-                        recipientRole: data.requiresRevisionBy,
-                        recipientUid: data.requiresRevisionBy === 'bdm' ? proposal.createdByUid : null,
-                        proposalId: id,
-                        message: `Revision required for ${proposal.projectName}: ${data.comments}`,
-                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                        isRead: false
-                    });
-                    break;
-                    
-                case 'resubmit_after_revision':
                     updates = {
-                        status: 'pending_director_approval',
-                        revisionHistory: admin.firestore.FieldValue.arrayUnion({
-                            revisedBy: req.user.name,
-                            revisedAt: new Date().toISOString(),
-                            revisionNotes: data.notes
-                        })
+                        pricing: {
+                            quoteValue: data.quoteValue || 0,
+                            currency: data.currency || 'USD',
+                            pricedBy: req.user.name,
+                            pricedAt: new Date().toISOString(),
+                            notes: data.notes || ''
+                        },
+                        status: 'pricing_complete'
                     };
-                    activityDetail = `Revision completed and resubmitted by ${req.user.name}`;
+                    activityDetail = `Pricing added: ${data.currency} ${data.quoteValue}`;
+                    
+                    await db.collection('notifications').add({
+                        type: 'pricing_complete',
+                        recipientUid: proposal.createdByUid,
+                        recipientRole: 'bdm',
+                        proposalId: id,
+                        message: `Pricing ready for ${proposal.projectName} - Ready to submit to client`,
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        isRead: false,
+                        priority: 'high'
+                    });
                     break;
                     
                 case 'submit_to_client':
-                    // Only BDM can submit to client
-                    if (req.user.role !== 'bdm') {
+                    if (req.user.role !== 'bdm' || proposal.createdByUid !== req.user.uid) {
                         return res.status(403).json({ 
                             success: false, 
-                            error: 'Only BDM can submit to client' 
+                            error: 'Only the BDM who created this proposal can submit it' 
+                        });
+                    }
+                    
+                    if (proposal.status !== 'pricing_complete') {
+                        return res.status(400).json({ 
+                            success: false, 
+                            error: 'Proposal must have pricing before submission' 
                         });
                     }
                     
@@ -384,15 +410,6 @@ const handler = async (req, res) => {
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         isRead: false
                     });
-                    
-                    await db.collection('notifications').add({
-                        type: 'proposal_won',
-                        recipientRole: 'design_lead',
-                        proposalId: id,
-                        message: `New won proposal: ${proposal.projectName} - Awaiting COO allocation`,
-                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                        isRead: false
-                    });
                     break;
                     
                 case 'mark_lost':
@@ -403,7 +420,6 @@ const handler = async (req, res) => {
                     };
                     activityDetail = `Proposal marked as LOST: ${data.reason}`;
                     
-                    // Notify Director for reporting
                     await db.collection('notifications').add({
                         type: 'proposal_lost',
                         recipientRole: 'director',
@@ -430,7 +446,6 @@ const handler = async (req, res) => {
             });
             updates.updatedAt = admin.firestore.FieldValue.serverTimestamp();
             
-            // Update the proposal
             await proposalRef.update(updates);
             
             // Log activity
@@ -477,7 +492,7 @@ const handler = async (req, res) => {
             
             const proposalData = proposalDoc.data();
             
-            // Security check: Only creator or a director can delete
+            // Security check
             if (proposalData.createdByUid !== req.user.uid && req.user.role !== 'director') {
                 return res.status(403).json({ 
                     success: false, 
@@ -485,12 +500,11 @@ const handler = async (req, res) => {
                 });
             }
 
-            // Delete associated files from storage and Firestore
+            // Delete associated files
             const filesSnapshot = await db.collection('files').where('proposalId', '==', id).get();
             if (!filesSnapshot.empty) {
                 const deletePromises = filesSnapshot.docs.map(doc => {
                     const fileData = doc.data();
-                    // Skip deletion for link-type files (they don't have physical storage)
                     if (fileData.fileType === 'link') {
                         return doc.ref.delete();
                     }
@@ -504,7 +518,6 @@ const handler = async (req, res) => {
                 await Promise.all(deletePromises);
             }
 
-            // Delete the proposal document
             await proposalRef.delete();
             
             // Log activity
@@ -524,9 +537,6 @@ const handler = async (req, res) => {
             });
         }
 
-        // ============================================
-        // Method not allowed
-        // ============================================
         return res.status(405).json({ 
             success: false, 
             error: 'Method not allowed' 

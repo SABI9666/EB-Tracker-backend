@@ -339,28 +339,53 @@ const handler = async (req, res) => {
                             error: 'Only COO can add pricing' 
                         });
                     }
-                    
+                        
+                    // Validate required pricing data
+                    if (!data.quoteValue || !data.projectNumber) {
+                        return res.status(400).json({
+                            success: false,
+                            error: 'Quote value and project number are required'
+                        });
+                    }
+                        
                     updates = {
                         pricing: {
+                            projectNumber: data.projectNumber,
                             quoteValue: data.quoteValue || 0,
                             currency: data.currency || 'USD',
+                            hourlyRate: data.hourlyRate || null,
+                            profitMargin: data.profitMargin || null,
+                            notes: data.notes || '',
+                            costBreakdown: data.costBreakdown || null,
                             pricedBy: req.user.name,
-                            pricedAt: new Date().toISOString(),
-                            notes: data.notes || ''
+                            pricedByUid: req.user.uid,
+                            pricedAt: new Date().toISOString()
                         },
                         status: 'pricing_complete'
                     };
-                    activityDetail = `Pricing added: ${data.currency} ${data.quoteValue}`;
-                    
+                        
+                    activityDetail = `Pricing added: ${data.currency} ${data.quoteValue} - Project Number: ${data.projectNumber}`;
+                        
+                    // Notify BDM that pricing is ready
                     await db.collection('notifications').add({
                         type: 'pricing_complete',
                         recipientUid: proposal.createdByUid,
                         recipientRole: 'bdm',
                         proposalId: id,
-                        message: `Pricing ready for ${proposal.projectName} - Ready to submit to client`,
+                        message: `Pricing ready for ${proposal.projectName} - Project #${data.projectNumber}. Ready to submit to client.`,
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         isRead: false,
                         priority: 'high'
+                    });
+                        
+                    // Also notify Director
+                    await db.collection('notifications').add({
+                        type: 'pricing_complete',
+                        recipientRole: 'director',
+                        proposalId: id,
+                        message: `COO completed pricing for ${proposal.projectName} - ${data.currency} ${data.quoteValue}`,
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        isRead: false
                     });
                     break;
                     

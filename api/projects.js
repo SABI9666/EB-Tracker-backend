@@ -1,4 +1,4 @@
-// api/projects.js - FIXED VERSION with proper design_lead filtering
+// api/projects.js - MERGED VERSION
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
@@ -17,7 +17,7 @@ const allowCors = fn => async (req, res) => {
     return await fn(req, res);
 };
 
-// Helper function to generate project code
+// Helper function to generate project code (for actual projects)
 async function generateProjectCode(clientCompany) {
     const year = new Date().getFullYear().toString().slice(-2);
     const clientPrefix = (clientCompany || 'GEN').substring(0, 3).toUpperCase();
@@ -31,6 +31,25 @@ async function generateProjectCode(clientCompany) {
     const count = snapshot.data().count;
     const sequence = (count + 1).toString().padStart(3, '0');
 
+    return `${clientPrefix}${year}-${sequence}`;
+}
+
+// Helper function to generate project number (for proposals/pricing)
+async function generateProjectNumber(clientCompany) {
+    const year = new Date().getFullYear().toString().slice(-2); // Last 2 digits of year
+    const clientPrefix = (clientCompany || 'GEN').substring(0, 3).toUpperCase();
+        
+    // Get the count of all proposals with this prefix this year
+    const proposalsRef = db.collection('proposals');
+    const snapshot = await proposalsRef
+        .where('pricing.projectNumber', '>=', `${clientPrefix}${year}-`)
+        .where('pricing.projectNumber', '<', `${clientPrefix}${year}-~`)
+        .count()
+        .get();
+        
+    const count = snapshot.data().count;
+    const sequence = (count + 1).toString().padStart(3, '0'); // e.g., 001, 002, 003
+        
     return `${clientPrefix}${year}-${sequence}`;
 }
 
@@ -124,10 +143,10 @@ const handler = async (req, res) => {
         }
 
         // ============================================
-        // POST - Create Project from Proposal
+        // POST - Create Project from Proposal OR Generate Project Number
         // ============================================
         if (req.method === 'POST') {
-            // FIXED: Read action from both query parameter and request body
+            // Read action from both query parameter and request body
             const action = req.query.action || req.body?.action;
             
             if (action === 'create_from_proposal') {
@@ -215,6 +234,38 @@ const handler = async (req, res) => {
                     message: 'Project created successfully'
                 });
             }
+            // --- ADDED ACTION ---
+            else if (action === 'generate_project_number') {
+                // Only COO or Director can generate project numbers
+                if (!['coo', 'director'].includes(req.user.role)) {
+                    return res.status(403).json({ 
+                        success: false, 
+                        error: 'Only COO or Director can generate project numbers' 
+                    });
+                }
+    
+                const { clientCompany } = req.body;
+    
+                if (!clientCompany) {
+                    return res.status(400).json({ 
+                        success: false, 
+                        error: 'Client company name is required' 
+                    });
+                }
+    
+                // Call the new helper function
+                const projectNumber = await generateProjectNumber(clientCompany);
+    
+                return res.status(200).json({
+                    success: true,
+                    data: {
+                        projectNumber: projectNumber,
+                        generatedAt: new Date().toISOString(),
+                        generatedBy: req.user.name
+                    }
+                });
+            }
+            // --- END ADDED ACTION ---
 
             return res.status(400).json({ success: false, error: 'Invalid action for POST request' });
         }
@@ -449,7 +500,7 @@ const handler = async (req, res) => {
              const projectRef = db.collection('projects').doc(id);
              const projectDoc = await projectRef.get();
              if (!projectDoc.exists) {
-                 return res.status(404).json({ success: false, error: 'Project not found' });
+                 return res.status(44).json({ success: false, error: 'Project not found' });
              }
 
              await projectRef.delete();

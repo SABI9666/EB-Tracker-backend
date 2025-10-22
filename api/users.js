@@ -1,4 +1,4 @@
-// api/users.js - User management API for fetching users by role
+// api/users.js - User management API
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
@@ -22,10 +22,48 @@ const handler = async (req, res) => {
         await util.promisify(verifyToken)(req, res);
 
         // ============================================
-        // GET - Retrieve users by role
+        // GET - Retrieve single user OR users by role
         // ============================================
         if (req.method === 'GET') {
-            const { role, includeInactive } = req.query;
+            const { role, includeInactive, id } = req.query;
+
+            // --- MERGED: Get single user by ID ---
+            if (id) {
+                const userDoc = await db.collection('users').doc(id).get();
+                
+                if (!userDoc.exists) {
+                    return res.status(404).json({ 
+                        success: false, 
+                        error: 'User not found' 
+                    });
+                }
+                
+                const userData = userDoc.data();
+                // Return safe data, consistent with list view
+                const safeData = {
+                    uid: userDoc.id,
+                    name: userData.name,
+                    email: userData.email,
+                    role: userData.role,
+                    status: userData.status || 'active',
+                    department: userData.department || '',
+                    joinDate: userData.joinDate || null,
+                    ...(userData.role === 'design_lead' && {
+                        activeProjects: userData.activeProjects || 0
+                    }),
+                    ...(userData.role === 'designer' && {
+                        assignedProjects: userData.assignedProjects || 0
+                    })
+                };
+                
+                return res.status(200).json({
+                    success: true,
+                    data: safeData
+                });
+            }
+            // --- END MERGE ---
+            
+            // --- Get user list (from uploaded file) ---
             
             // Only COO, Director, and Design Lead can fetch users list
             if (!['coo', 'director', 'design_lead'].includes(req.user.role)) {
@@ -93,6 +131,26 @@ const handler = async (req, res) => {
         // POST - Create new user (admin only)
         // ============================================
         if (req.method === 'POST') {
+            
+            // --- MERGED: Manual body parser for serverless ---
+            if (!req.body || Object.keys(req.body).length === 0) {
+                await new Promise((resolve) => {
+                    const chunks = [];
+                    req.on('data', (chunk) => chunks.push(chunk));
+                    req.on('end', () => {
+                        try {
+                            const bodyBuffer = Buffer.concat(chunks);
+                            req.body = bodyBuffer.length > 0 ? JSON.parse(bodyBuffer.toString()) : {};
+                        } catch (e) {
+                            console.error("Error parsing JSON body:", e);
+                            req.body = {};
+                        }
+                        resolve();
+                    });
+                });
+            }
+            // --- END MERGE ---
+            
             // Only Director can create users
             if (req.user.role !== 'director') {
                 return res.status(403).json({ 
@@ -178,6 +236,26 @@ const handler = async (req, res) => {
         // PUT - Update user status or role
         // ============================================
         if (req.method === 'PUT') {
+            
+            // --- ADDED: Manual body parser for serverless ---
+            if (!req.body || Object.keys(req.body).length === 0) {
+                await new Promise((resolve) => {
+                    const chunks = [];
+                    req.on('data', (chunk) => chunks.push(chunk));
+                    req.on('end', () => {
+                        try {
+                            const bodyBuffer = Buffer.concat(chunks);
+                            req.body = bodyBuffer.length > 0 ? JSON.parse(bodyBuffer.toString()) : {};
+                        } catch (e) {
+                            console.error("Error parsing JSON body:", e);
+                            req.body = {};
+                        }
+                        resolve();
+                    });
+                });
+            }
+            // --- END ADD ---
+
             // Only Director can update users
             if (req.user.role !== 'director') {
                 return res.status(403).json({ 
@@ -200,7 +278,7 @@ const handler = async (req, res) => {
             const userDoc = await userRef.get();
             
             if (!userDoc.exists) {
-                return res.status(404).json({ 
+                return res.status(44).json({ 
                     success: false, 
                     error: 'User not found' 
                 });
@@ -271,6 +349,13 @@ const handler = async (req, res) => {
         
     } catch (error) {
         console.error('Users API error:', error);
+        // Check for specific auth errors
+        if (error.code === 'auth/id-token-expired') {
+            return res.status(401).json({ success: false, error: 'Token expired' });
+        }
+        if (error.code === 'auth/id-token-revoked') {
+            return res.status(401).json({ success: false, error: 'Token revoked' });
+        }
         return res.status(500).json({ 
             success: false, 
             error: 'Internal Server Error', 
@@ -280,27 +365,3 @@ const handler = async (req, res) => {
 };
 
 module.exports = allowCors(handler);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

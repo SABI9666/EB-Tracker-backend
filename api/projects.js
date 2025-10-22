@@ -127,7 +127,10 @@ const handler = async (req, res) => {
         // POST - Create Project from Proposal
         // ============================================
         if (req.method === 'POST') {
-            if (req.query.action === 'create_from_proposal') {
+            // FIXED: Read action from both query parameter and request body
+            const action = req.query.action || req.body?.action;
+            
+            if (action === 'create_from_proposal') {
                 const { proposalId } = req.body;
 
                 if (!proposalId) {

@@ -315,6 +315,7 @@ const handler = async (req, res) => {
                             manhours: data.manhours || 0,
                             boqUploaded: data.boqUploaded || false,
                             estimatorName: req.user.name,
+                            estimatorUid: req.user.uid, // Storing estimator UID
                             estimatedAt: new Date().toISOString(),
                             notes: data.notes || ''
                         },
@@ -397,11 +398,11 @@ const handler = async (req, res) => {
                         });
                     }
                     
-                    if (proposal.status !== 'pricing_complete') {
-                        return res.status(400).json({ 
-                            success: false, 
-                            error: 'Proposal must have pricing before submission' 
-                        });
+                    if (proposal.status !== 'pricing_complete' && proposal.status !== 'approved') {
+                         return res.status(400).json({ 
+                             success: false, 
+                             error: 'Proposal must have pricing complete or be approved by Director before submission' 
+                         });
                     }
                     
                     updates = { status: 'submitted_to_client' };
@@ -584,6 +585,193 @@ const handler = async (req, res) => {
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         isRead: false
                     });
+                    break;
+                
+                // ==================================================================
+                // == DIRECTOR APPROVE/REJECT PROPOSAL (NEW CASES) ==
+                // ==================================================================
+                case 'approve_proposal':
+                    // Only Director can approve proposals
+                    if (req.user.role !== 'director') {
+                        return res.status(403).json({ 
+                            success: false, 
+                            error: 'Only Director can approve proposals' 
+                        });
+                    }
+                    
+                    // Can approve proposals in any status before approval
+                    const validStatusesForApproval = ['draft', 'estimation_complete', 'pricing_complete', 'pending_approval'];
+                    if (!validStatusesForApproval.includes(proposal.status)) {
+                        return res.status(400).json({ 
+                            success: false, 
+                            error: `Cannot approve proposal with status: ${proposal.status}` 
+                        });
+                    }
+                    
+                    updates = {
+                        status: 'approved',
+                        directorApproval: {
+                            approved: true,
+                            approvedBy: req.user.name,
+                            approvedByUid: req.user.uid,
+                            approvedAt: admin.firestore.FieldValue.serverTimestamp(),
+                            comments: data.comments || ''
+                        }
+                    };
+                    
+                    activityDetail = `Proposal approved by Director ${req.user.name}`;
+                    
+                    // Notify BDM
+                    await db.collection('notifications').add({
+                        type: 'proposal_approved',
+                        recipientUid: proposal.createdByUid,
+                        recipientRole: 'bdm',
+                        proposalId: id,
+                        message: `Your proposal "${proposal.projectName}" has been approved by Director. You can now submit to client.`,
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        isRead: false,
+                        priority: 'high'
+                    });
+                    
+                    // Notify COO
+                    await db.collection('notifications').add({
+                        type: 'proposal_approved',
+                        recipientRole: 'coo',
+                        proposalId: id,
+                        message: `Proposal "${proposal.projectName}" approved by Director ${req.user.name}`,
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        isRead: false
+                    });
+                    break;
+
+                case 'reject_proposal':
+                    // Only Director can reject proposals
+                    if (req.user.role !== 'director') {
+                        return res.status(403).json({ 
+                            success: false, 
+                            error: 'Only Director can reject proposals' 
+                        });
+                    }
+                    
+                    if (!data.reason || !data.reason.trim()) {
+                        return res.status(400).json({ 
+                            success: false, 
+                            error: 'Rejection reason is required' 
+                        });
+                    }
+                    
+                    updates = {
+                        status: 'rejected',
+                        directorApproval: {
+                            approved: false,
+                            rejectedBy: req.user.name,
+                            rejectedByUid: req.user.uid,
+                            rejectedAt: admin.firestore.FieldValue.serverTimestamp(),
+                            reason: data.reason,
+                            comments: data.comments || ''
+                        }
+                    };
+                    
+                    activityDetail = `Proposal rejected by Director ${req.user.name}: ${data.reason}`;
+                    
+                    // Notify BDM
+                    await db.collection('notifications').add({
+                        type: 'proposal_rejected',
+                        recipientUid: proposal.createdByUid,
+                        recipientRole: 'bdm',
+                        proposalId: id,
+                        message: `Your proposal "${proposal.projectName}" was rejected by Director. Reason: ${data.reason}`,
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        isRead: false,
+                        priority: 'high'
+                    });
+                    
+                    // Notify COO
+                    await db.collection('notifications').add({
+                        type: 'proposal_rejected',
+                        recipientRole: 'coo',
+                        proposalId: id,
+                        message: `Proposal "${proposal.projectName}" rejected by Director ${req.user.name}`,
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        isRead: false
+                    });
+                    
+                    // Notify Estimator if estimation was done
+                    if (proposal.estimation && proposal.estimation.estimatorUid) {
+                        await db.collection('notifications').add({
+                            type: 'proposal_rejected',
+                            recipientUid: proposal.estimation.estimatorUid,
+                            recipientRole: 'estimator',
+                            proposalId: id,
+                            message: `Proposal "${proposal.projectName}" was rejected by Director`,
+                            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                            isRead: false
+                        });
+                    }
+                    break;
+                
+                // ==================================================================
+                // == REQUEST DIRECTOR APPROVAL (Optional - for explicit workflow) ==
+                // ==================================================================
+                case 'request_approval':
+                    // COO or BDM can request approval
+                    if (!['coo', 'bdm'].includes(req.user.role)) {
+                        return res.status(403).json({ 
+                            success: false, 
+                            error: 'Only COO or BDM can request approval' 
+                        });
+                    }
+                    
+                    // Must have pricing complete
+                    if (!proposal.pricing || !proposal.pricing.projectNumber) {
+                        return res.status(400).json({ 
+                            success: false, 
+                            error: 'Proposal must have pricing and project number before requesting approval' 
+                        });
+                    }
+                    
+                    updates = {
+                        status: 'pending_approval',
+                        approvalRequestedBy: req.user.name,
+                        approvalRequestedAt: admin.firestore.FieldValue.serverTimestamp()
+                    };
+                    
+                    activityDetail = `Approval requested by ${req.user.name}`;
+                    
+                    // Notify Director
+                    await db.collection('notifications').add({
+                        type: 'approval_requested',
+                        recipientRole: 'director',
+                        proposalId: id,
+                        message: `${req.user.name} requests your approval for "${proposal.projectName}" - Value: ${proposal.pricing.currency} ${proposal.pricing.quoteValue}`,
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        isRead: false,
+                        priority: 'high'
+                    });
+                    break;
+
+                // ============================================
+                // == ALLOCATION STATUS TRACKING (NEW CASE) ==
+                // ============================================
+                case 'update_allocation_status':
+                    // Only COO or Director can update allocation status
+                    if (!['coo', 'director'].includes(req.user.role)) {
+                        return res.status(403).json({ 
+                            success: false, 
+                            error: 'Only COO or Director can update allocation status' 
+                        });
+                    }
+                    
+                    updates = {
+                        allocationStatus: data.allocationStatus || 'allocated',
+                        designLeadName: data.designLeadName || null,
+                        designLeadUid: data.designLeadUid || null,
+                        allocatedAt: data.allocatedAt || admin.firestore.FieldValue.serverTimestamp(),
+                        allocatedBy: req.user.name,
+                        allocatedByUid: req.user.uid
+                    };
+                    
+                    activityDetail = `Project allocated to Design Manager: ${data.designLeadName}`;
                     break;
                     
                 default:

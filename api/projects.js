@@ -149,91 +149,160 @@ const handler = async (req, res) => {
             // Read action from both query parameter and request body
             const action = req.query.action || req.body?.action;
             
+            // --- MODIFIED BLOCK ---
             if (action === 'create_from_proposal') {
-                const { proposalId } = req.body;
-
+                const { proposalId, designLeadUid, allocationComments } = req.body;
                 if (!proposalId) {
                     return res.status(400).json({ success: false, error: 'Missing proposal ID' });
                 }
-
-                // Only COO or Director can create projects
-                if (!['coo', 'director'].includes(req.user.role)) {
-                    return res.status(403).json({ success: false, error: 'Only COO or Director can create projects from proposals' });
+                    
+                if (!designLeadUid) {
+                    return res.status(400).json({ success: false, error: 'Design Manager/Lead must be selected' });
                 }
-
+                // Only COO or Director can create/allocate projects
+                if (!['coo', 'director'].includes(req.user.role)) {
+                    return res.status(403).json({ 
+                        success: false, 
+                        error: 'Only COO or Director can allocate projects' 
+                    });
+                }
                 const proposalRef = db.collection('proposals').doc(proposalId);
                 const proposalDoc = await proposalRef.get();
-
                 if (!proposalDoc.exists) {
                     return res.status(404).json({ success: false, error: 'Proposal not found' });
                 }
-
                 const proposalData = proposalDoc.data();
-
                 if (proposalData.status !== 'won') {
-                    return res.status(400).json({ success: false, error: 'Proposal must be marked as WON before creating a project' });
+                    return res.status(400).json({ 
+                        success: false, 
+                        error: 'Proposal must be marked as WON before creating a project' 
+                    });
                 }
+                    
                 if (proposalData.projectCreated) {
-                    return res.status(400).json({ success: false, error: 'Project has already been created for this proposal' });
+                    return res.status(400).json({ 
+                        success: false, 
+                        error: 'Project has already been created for this proposal' 
+                    });
                 }
-
+                    
+                // Validate Design Lead
+                const designLeadDoc = await db.collection('users').doc(designLeadUid).get();
+                if (!designLeadDoc.exists || designLeadDoc.data().role !== 'design_lead') {
+                    return res.status(400).json({ 
+                        success: false, 
+                        error: 'Invalid Design Manager/Lead selected' 
+                    });
+                }
+                    
+                const designLeadData = designLeadDoc.data();
+                // Generate project code
                 const projectCode = await generateProjectCode(proposalData.clientCompany);
-
-                const newProject = {
+                    
+                // Get project number from pricing (set by COO)
+                const projectNumber = proposalData.pricing?.projectNumber || 'Not Set';
+                // Create project document
+                const projectData = {
                     proposalId: proposalId,
+                    projectCode: projectCode,
+                    projectNumber: projectNumber,  // NEW: Include project number
                     projectName: proposalData.projectName,
                     clientCompany: proposalData.clientCompany,
-                    projectType: proposalData.projectType,
-                    scopeOfWork: proposalData.scopeOfWork,
-                    country: proposalData.country,
-                    timeline: proposalData.timeline,
+                    clientName: proposalData.clientName,
+                    clientEmail: proposalData.clientEmail,
+                    clientPhone: proposalData.clientPhone,
+                    projectLocation: proposalData.projectLocation || '',
+                    projectType: proposalData.projectType || 'General',
+                    scopeOfWork: proposalData.scopeOfWork || '',
+                    estimatedValue: proposalData.pricing?.quoteValue || 0,
+                            
+                    // BDM info
                     bdmUid: proposalData.createdByUid,
                     bdmName: proposalData.createdByName,
-                    bdmEmail: proposalData.createdByEmail || '',
-                    projectCode: projectCode,
-                    status: 'pending_allocation',
-                    designStatus: 'pending_allocation',
+                    bdmEmail: proposalData.createdByEmail,
+                            
+                    // Design Lead allocation
+                    designLeadUid: designLeadUid,
+                    designLeadName: designLeadData.name,
+                    designLeadEmail: designLeadData.email,
+                    allocationComments: allocationComments || '',  // NEW: Allocation comments
+                    allocatedBy: req.user.name,                    // NEW: Who allocated
+                    allocatedByUid: req.user.uid,                  // NEW: Allocator UID
+                    allocatedAt: admin.firestore.FieldValue.serverTimestamp(),  // NEW: When allocated
+                            
+                    // Status fields
+                    projectStatus: 'active',
+                    designStatus: 'pending_assignment',
+                    financialStatus: 'pending',
+                            
+                    // Timestamps
                     createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                    createdBy: req.user.name,
-                    createdByUid: req.user.uid,
-                    pricing: proposalData.pricing || {}
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                            
+                    // Arrays
+                    assignedDesignerUids: [],
+                    assignedDesignerNames: [],
+                    assignedDesignerEmails: [],
+                    milestones: [],
+                    changeLog: []
                 };
-
-                const projectRef = await db.collection('projects').add(newProject);
-
+                const projectRef = await db.collection('projects').add(projectData);
+                // Update proposal with allocation status
                 await proposalRef.update({
                     projectCreated: true,
                     projectId: projectRef.id,
+                    projectCode: projectCode,
+                    allocationStatus: 'allocated',  // NEW: Update allocation status
+                    allocationApprovedBy: req.user.name,  // NEW: Who approved allocation
+                    allocationApprovedAt: admin.firestore.FieldValue.serverTimestamp(),  // NEW: When
                     updatedAt: admin.firestore.FieldValue.serverTimestamp()
                 });
-
+                // Log activity
                 await db.collection('activities').add({
-                    type: 'project_created',
-                    details: `Project created from proposal: ${proposalData.projectName} (${projectCode})`,
+                    type: 'project_created_and_allocated',
+                    details: `Project ${projectCode} created and allocated to ${designLeadData.name} by ${req.user.name}`,
                     performedByName: req.user.name,
                     performedByRole: req.user.role,
                     performedByUid: req.user.uid,
                     timestamp: admin.firestore.FieldValue.serverTimestamp(),
                     projectId: projectRef.id,
-                    proposalId: proposalId
+                    proposalId: proposalId,
+                    projectName: proposalData.projectName
                 });
-
+                // Notify Design Lead
                 await db.collection('notifications').add({
-                    type: 'project_created',
+                    type: 'project_allocated',
+                    recipientUid: designLeadUid,
                     recipientRole: 'design_lead',
-                    message: `New project created: "${proposalData.projectName}" - Awaiting COO allocation`,
                     projectId: projectRef.id,
+                    proposalId: proposalId,
+                    message: `You have been allocated to project "${proposalData.projectName}" (${projectCode}) by ${req.user.name}`,
                     createdAt: admin.firestore.FieldValue.serverTimestamp(),
                     isRead: false,
-                    priority: 'normal'
+                    priority: 'high'
                 });
-
+                    
+                // Notify BDM
+                await db.collection('notifications').add({
+                    type: 'project_allocated_to_design',
+                    recipientUid: proposalData.createdByUid,
+                    recipientRole: 'bdm',
+                    projectId: projectRef.id,
+                    message: `Your project "${proposalData.projectName}" has been allocated to ${designLeadData.name}`,
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    isRead: false
+                });
                 return res.status(201).json({
                     success: true,
-                    data: { id: projectRef.id, ...newProject },
-                    message: 'Project created successfully'
+                    message: `Project created successfully and allocated to ${designLeadData.name}`,
+                    data: {
+                        projectId: projectRef.id,
+                        projectCode: projectCode,
+                        projectNumber: projectNumber
+                    }
                 });
             }
+            // --- END MODIFIED BLOCK ---
             // --- ADDED ACTION ---
             else if (action === 'generate_project_number') {
                 // Only COO or Director can generate project numbers
@@ -363,7 +432,7 @@ const handler = async (req, res) => {
 
                 // Design Lead can only assign to their own projects
                 if (req.user.role === 'design_lead' && project.designLeadUid !== req.user.uid) {
-                    return res.status(403).json({ success: false, error: 'You can only assign designers to your own projects' });
+                    return res.status(4H03).json({ success: false, error: 'You can only assign designers to your own projects' });
                 }
 
                 if (!data.designerUids || !Array.isArray(data.designerUids)) {
@@ -500,7 +569,7 @@ const handler = async (req, res) => {
              const projectRef = db.collection('projects').doc(id);
              const projectDoc = await projectRef.get();
              if (!projectDoc.exists) {
-                 return res.status(44).json({ success: false, error: 'Project not found' });
+                 return res.status(404).json({ success: false, error: 'Project not found' });
              }
 
              await projectRef.delete();

@@ -1,4 +1,4 @@
-/ api/proposals.js - UPDATED VERSION with new workflow
+// api/proposals.js - UPDATED VERSION with new workflow
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
@@ -22,7 +22,6 @@ const handler = async (req, res) => {
     try {
         await util.promisify(verifyToken)(req, res);
 
-        // Parse JSON body for POST/PUT
         if ((req.method === 'POST' || req.method === 'PUT') && req.headers['content-type'] === 'application/json') {
             if (!req.body || Object.keys(req.body).length === 0) {
                 await new Promise((resolve) => {
@@ -42,23 +41,17 @@ const handler = async (req, res) => {
             }
         }
 
-        // ============================================
-        // GET - Retrieve proposals
-        // ============================================
         if (req.method === 'GET') {
             const { id } = req.query;
             
             if (id) {
-                // Get single proposal - implementation remains same
                 const doc = await db.collection('proposals').doc(id).get();
                 if (!doc.exists) {
                     return res.status(404).json({ success: false, error: 'Proposal not found' });
                 }
-                
                 return res.status(200).json({ success: true, data: { id: doc.id, ...doc.data() } });
             }
             
-            // Get all proposals with role-based filtering
             let proposals = [];
 
             if (req.user.role === 'bdm') {
@@ -68,27 +61,22 @@ const handler = async (req, res) => {
                 const snapshot = await query.get();
                 proposals = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             }
-            // ESTIMATOR: See all except Won projects
             else if (req.user.role === 'estimator') {
                 const allSnapshot = await db.collection('proposals')
                     .orderBy('createdAt', 'desc')
                     .get();
-                
                 proposals = allSnapshot.docs
                     .map(doc => ({ id: doc.id, ...doc.data() }))
                     .filter(proposal => proposal.status !== 'won');
             }
-            // COO: See only new proposals without pricing
             else if (req.user.role === 'coo') {
                 const allSnapshot = await db.collection('proposals')
                     .orderBy('createdAt', 'desc')
                     .get();
-                
                 proposals = allSnapshot.docs
                     .map(doc => ({ id: doc.id, ...doc.data() }))
                     .filter(proposal => !proposal.pricing || !proposal.pricing.projectNumber);
             }
-            // DIRECTOR: See only proposals pending approval
             else if (req.user.role === 'director') {
                 const query = db.collection('proposals')
                     .where('status', '==', 'pending_approval')
@@ -97,7 +85,6 @@ const handler = async (req, res) => {
                 proposals = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             }
             else {
-                // Other roles see all
                 const query = db.collection('proposals').orderBy('createdAt', 'desc');
                 const snapshot = await query.get();
                 proposals = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -106,24 +93,15 @@ const handler = async (req, res) => {
             return res.status(200).json({ success: true, data: proposals });
         }
 
-        // ============================================
-        // POST - Create new proposal
-        // ============================================
         if (req.method === 'POST') {
             if (req.user.role !== 'bdm') {
-                return res.status(403).json({ 
-                    success: false, 
-                    error: 'Only BDMs can create proposals' 
-                });
+                return res.status(403).json({ success: false, error: 'Only BDMs can create proposals' });
             }
 
             const { projectName, clientCompany, clientContact, projectLocation, projectType, services, description } = req.body;
 
             if (!projectName || !clientCompany) {
-                return res.status(400).json({ 
-                    success: false, 
-                    error: 'Project name and client company are required' 
-                });
+                return res.status(400).json({ success: false, error: 'Project name and client company are required' });
             }
 
             const proposalData = {
@@ -159,35 +137,22 @@ const handler = async (req, res) => {
                 clientCompany: clientCompany
             });
 
-            return res.status(201).json({ 
-                success: true, 
-                message: 'Proposal created successfully',
-                proposalId: docRef.id 
-            });
+            return res.status(201).json({ success: true, message: 'Proposal created successfully', proposalId: docRef.id });
         }
 
-        // ============================================
-        // PUT - Update proposal
-        // ============================================
         if (req.method === 'PUT') {
             const { id } = req.query;
             const { action, data } = req.body;
 
             if (!id || !action) {
-                return res.status(400).json({ 
-                    success: false, 
-                    error: 'Missing required parameters' 
-                });
+                return res.status(400).json({ success: false, error: 'Missing required parameters' });
             }
 
             const proposalRef = db.collection('proposals').doc(id);
             const proposalDoc = await proposalRef.get();
 
             if (!proposalDoc.exists) {
-                return res.status(404).json({ 
-                    success: false, 
-                    error: 'Proposal not found' 
-                });
+                return res.status(404).json({ success: false, error: 'Proposal not found' });
             }
 
             const proposal = proposalDoc.data();
@@ -195,7 +160,6 @@ const handler = async (req, res) => {
             let activityDetail = '';
 
             switch (action) {
-                // ESTIMATOR: Update Tonnage and Hours
                 case 'update_estimation':
                     if (req.user.role !== 'estimator') {
                         return res.status(403).json({ success: false, error: 'Only estimators can update estimation' });
@@ -225,7 +189,6 @@ const handler = async (req, res) => {
                     activityDetail = `Estimation updated: ${totalHours || 0} hours, ${tonnage || 0} tons`;
                     break;
 
-                // COO: Add Pricing and Project Number
                 case 'add_pricing':
                     if (req.user.role !== 'coo') {
                         return res.status(403).json({ success: false, error: 'Only COO can add pricing' });
@@ -262,7 +225,6 @@ const handler = async (req, res) => {
                     });
                     break;
 
-                // DIRECTOR: Approve
                 case 'approve':
                     if (req.user.role !== 'director') {
                         return res.status(403).json({ success: false, error: 'Only Director can approve' });
@@ -292,7 +254,6 @@ const handler = async (req, res) => {
                     });
                     break;
 
-                // DIRECTOR: Reject
                 case 'reject':
                     if (req.user.role !== 'director') {
                         return res.status(403).json({ success: false, error: 'Only Director can reject' });
@@ -351,9 +312,6 @@ const handler = async (req, res) => {
             return res.status(200).json({ success: true, message: 'Proposal updated successfully' });
         }
 
-        // ============================================
-        // DELETE - Delete proposal
-        // ============================================
         if (req.method === 'DELETE') {
             const { id } = req.query;
             
@@ -374,7 +332,6 @@ const handler = async (req, res) => {
                 return res.status(403).json({ success: false, error: 'Unauthorized' });
             }
 
-            // Delete associated files
             const filesSnapshot = await db.collection('files').where('proposalId', '==', id).get();
             if (!filesSnapshot.empty) {
                 const deletePromises = filesSnapshot.docs.map(doc => {

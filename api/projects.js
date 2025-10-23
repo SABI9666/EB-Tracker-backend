@@ -432,7 +432,7 @@ const handler = async (req, res) => {
 
                 // Design Lead can only assign to their own projects
                 if (req.user.role === 'design_lead' && project.designLeadUid !== req.user.uid) {
-                    return res.status(4H03).json({ success: false, error: 'You can only assign designers to your own projects' });
+                    return res.status(403).json({ success: false, error: 'You can only assign designers to your own projects' });
                 }
 
                 if (!data.designerUids || !Array.isArray(data.designerUids)) {

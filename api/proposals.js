@@ -407,35 +407,166 @@ const handler = async (req, res) => {
                     updates = { status: 'submitted_to_client' };
                     activityDetail = `Proposal submitted to client`;
                     break;
-                    
+
+                // ==================================================================
+                // == MODIFIED 'mark_won' CASE ==
+                // ==================================================================
                 case 'mark_won':
                     updates = { 
                         status: 'won',
                         wonDate: data.wonDate || new Date().toISOString(),
-                        projectCreated: false
+                        projectCreated: false,
+                        allocationStatus: 'needs_allocation'  // ADDED THIS LINE
                     };
                     activityDetail = `Proposal marked as WON`;
-                    
-                    // Notify management
+                        
+                    // Notify management for allocation
                     await db.collection('notifications').add({
-                        type: 'proposal_won',
+                        type: 'proposal_won_needs_allocation',
                         recipientRole: 'coo',
                         proposalId: id,
-                        message: `${proposal.projectName} marked as WON - Ready for allocation to Design Manager`,
+                        message: `${proposal.projectName} marked as WON by ${proposal.createdByName} - Ready for allocation to Design Manager`,
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         isRead: false,
                         priority: 'high'
                     });
-                    
+                        
                     await db.collection('notifications').add({
-                        type: 'proposal_won',
+                        type: 'proposal_won_needs_allocation',
                         recipientRole: 'director',
                         proposalId: id,
                         message: `${proposal.projectName} won by ${proposal.createdByName} - Value: ${proposal.pricing?.quoteValue || 'N/A'}`,
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        isRead: false,
+                        priority: 'high'
+                    });
+                    break;
+                
+                // ==================================================================
+                // == NEW CASES ADDED HERE ==
+                // ==================================================================
+                case 'set_project_number':
+                    // Only COO can set/modify project number
+                    if (req.user.role !== 'coo') {
+                        return res.status(403).json({ 
+                            success: false, 
+                            error: 'Only COO can set project numbers' 
+                        });
+                    }
+                
+                    if (!data.projectNumber || !data.projectNumber.trim()) {
+                        return res.status(400).json({ 
+                            success: false, 
+                            error: 'Project number is required' 
+                        });
+                    }
+                
+                    // Check if project number already exists
+                    const existingSnapshot = await db.collection('proposals')
+                        .where('pricing.projectNumber', '==', data.projectNumber.trim())
+                        .get();
+                
+                    if (!existingSnapshot.empty && existingSnapshot.docs[0].id !== id) {
+                        return res.status(400).json({ 
+                            success: false, 
+                            error: 'This project number already exists. Please use a unique number.' 
+                        });
+                    }
+                
+                    updates = {
+                        'pricing.projectNumber': data.projectNumber.trim(),
+                        'pricing.projectNumberStatus': 'pending',
+                        'pricing.projectNumberEnteredBy': req.user.name,
+                        'pricing.projectNumberEnteredAt': admin.firestore.FieldValue.serverTimestamp()
+                    };
+                
+                    activityDetail = `Project Number set to ${data.projectNumber} by ${req.user.name}`;
+                
+                    // Notify Director for approval
+                    await db.collection('notifications').add({
+                        type: 'project_number_pending_approval',
+                        recipientRole: 'director',
+                        proposalId: id,
+                        message: `Project Number ${data.projectNumber} set by ${req.user.name} for "${proposal.projectName}" - Requires your approval`,
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        isRead: false,
+                        priority: 'high'
+                    });
+                    break;
+                
+                case 'approve_project_number':
+                    // Only Director can approve
+                    if (req.user.role !== 'director') {
+                        return res.status(403).json({ 
+                            success: false, 
+                            error: 'Only Director can approve project numbers' 
+                        });
+                    }
+                
+                    if (!proposal.pricing || !proposal.pricing.projectNumber) {
+                        return res.status(400).json({ 
+                            success: false, 
+                            error: 'No project number to approve' 
+                        });
+                    }
+                
+                    updates = {
+                        'pricing.projectNumberStatus': 'approved',
+                        'pricing.projectNumberApprovedBy': req.user.name,
+                        'pricing.projectNumberApprovedAt': admin.firestore.FieldValue.serverTimestamp()
+                    };
+                
+                    activityDetail = `Project Number ${proposal.pricing.projectNumber} approved by ${req.user.name}`;
+                
+                    // Notify COO
+                    await db.collection('notifications').add({
+                        type: 'project_number_approved',
+                        recipientRole: 'coo',
+                        proposalId: id,
+                        message: `Project Number ${proposal.pricing.projectNumber} for "${proposal.projectName}" has been approved by ${req.user.name}`,
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         isRead: false
                     });
                     break;
+                
+                case 'reject_project_number':
+                    // Only Director can reject
+                    if (req.user.role !== 'director') {
+                        return res.status(403).json({ 
+                            success: false, 
+                            error: 'Only Director can reject project numbers' 
+                        });
+                    }
+                
+                    if (!proposal.pricing || !proposal.pricing.projectNumber) {
+                        return res.status(400).json({ 
+                            success: false, 
+                            error: 'No project number to reject' 
+                        });
+                    }
+                
+                    updates = {
+                        'pricing.projectNumberStatus': 'rejected',
+                        'pricing.projectNumberRejectionReason': data.reason || 'No reason provided'
+                    };
+                
+                    activityDetail = `Project Number ${proposal.pricing.projectNumber} rejected by ${req.user.name}: ${data.reason}`;
+                
+                    // Notify COO
+                    await db.collection('notifications').add({
+                        type: 'project_number_rejected',
+                        recipientRole: 'coo',
+                        proposalId: id,
+                        message: `Project Number ${proposal.pricing.projectNumber} for "${proposal.projectName}" was rejected by ${req.user.name}. Reason: ${data.reason || 'Not specified'}`,
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        isRead: false,
+                        priority: 'high'
+                    });
+                    break;
+
+                // ==================================================================
+                // == END OF NEW CASES ==
+                // ==================================================================
                     
                 case 'mark_lost':
                     updates = { 

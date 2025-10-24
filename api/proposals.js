@@ -1,4 +1,4 @@
-// api/proposals.js - UPDATED VERSION with new workflow
+// api/proposals.js - COMPLETE UPDATED VERSION with index32 workflow
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
@@ -41,6 +41,7 @@ const handler = async (req, res) => {
             }
         }
 
+        // ===== GET REQUEST - FETCH PROPOSALS =====
         if (req.method === 'GET') {
             const { id } = req.query;
             
@@ -54,7 +55,9 @@ const handler = async (req, res) => {
             
             let proposals = [];
 
+            // Role-based queries matching index32 workflow
             if (req.user.role === 'bdm') {
+                // BDM sees only their own proposals
                 const query = db.collection('proposals')
                     .where('createdByUid', '==', req.user.uid)
                     .orderBy('createdAt', 'desc');
@@ -62,29 +65,38 @@ const handler = async (req, res) => {
                 proposals = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             }
             else if (req.user.role === 'estimator') {
+                // Estimator sees proposals needing estimation or revision
                 const allSnapshot = await db.collection('proposals')
                     .orderBy('createdAt', 'desc')
                     .get();
                 proposals = allSnapshot.docs
                     .map(doc => ({ id: doc.id, ...doc.data() }))
-                    .filter(proposal => proposal.status !== 'won');
+                    .filter(proposal => 
+                        proposal.status === 'pending_estimation' || 
+                        (proposal.status === 'revision_required' && 
+                         proposal.directorApproval?.requiresRevisionBy === 'estimator')
+                    );
             }
             else if (req.user.role === 'coo') {
+                // COO sees proposals needing pricing
                 const allSnapshot = await db.collection('proposals')
                     .orderBy('createdAt', 'desc')
                     .get();
                 proposals = allSnapshot.docs
                     .map(doc => ({ id: doc.id, ...doc.data() }))
-                    .filter(proposal => !proposal.pricing || !proposal.pricing.projectNumber);
+                    .filter(proposal => proposal.status === 'pending_pricing');
             }
             else if (req.user.role === 'director') {
-                const query = db.collection('proposals')
-                    .where('status', '==', 'pending_approval')
-                    .orderBy('createdAt', 'desc');
-                const snapshot = await query.get();
-                proposals = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                // Director sees proposals needing approval
+                const allSnapshot = await db.collection('proposals')
+                    .orderBy('createdAt', 'desc')
+                    .get();
+                proposals = allSnapshot.docs
+                    .map(doc => ({ id: doc.id, ...doc.data() }))
+                    .filter(proposal => proposal.status === 'pending_director_approval');
             }
             else {
+                // Admin or other roles see all
                 const query = db.collection('proposals').orderBy('createdAt', 'desc');
                 const snapshot = await query.get();
                 proposals = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -93,279 +105,305 @@ const handler = async (req, res) => {
             return res.status(200).json({ success: true, data: proposals });
         }
 
+        // ===== POST REQUEST - CREATE PROPOSAL =====
         if (req.method === 'POST') {
             if (req.user.role !== 'bdm') {
                 return res.status(403).json({ success: false, error: 'Only BDMs can create proposals' });
             }
 
-            const { projectName, clientCompany, clientContact, projectLocation, projectType, services, description } = req.body;
-
-            if (!projectName || !clientCompany) {
-                return res.status(400).json({ success: false, error: 'Project name and client company are required' });
-            }
-
             const proposalData = {
-                projectName,
-                clientCompany,
-                clientContact: clientContact || null,
-                projectLocation: projectLocation || null,
-                projectType: projectType || null,
-                services: services || [],
-                description: description || null,
-                status: 'draft',
+                ...req.body,
+                status: 'pending_estimation', // Initial status in new workflow
                 createdByName: req.user.name,
                 createdByUid: req.user.uid,
                 createdByEmail: req.user.email,
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-                estimationCompleted: false,
-                projectCreated: false,
-                changeLog: []
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
             };
 
             const docRef = await db.collection('proposals').add(proposalData);
 
+            // Log activity
             await db.collection('activities').add({
                 type: 'proposal_created',
-                details: `New proposal created: ${projectName}`,
+                proposalId: docRef.id,
+                details: `Proposal "${req.body.projectName}" created by ${req.user.name}`,
+                performedBy: req.user.uid,
                 performedByName: req.user.name,
                 performedByRole: req.user.role,
-                performedByUid: req.user.uid,
-                timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                proposalId: docRef.id,
-                projectName: projectName,
-                clientCompany: clientCompany
+                timestamp: admin.firestore.FieldValue.serverTimestamp()
             });
 
-            return res.status(201).json({ success: true, message: 'Proposal created successfully', proposalId: docRef.id });
+            return res.status(200).json({ 
+                success: true, 
+                message: 'Proposal created successfully',
+                data: { id: docRef.id, ...proposalData }
+            });
         }
 
+        // ===== PUT REQUEST - UPDATE PROPOSAL =====
         if (req.method === 'PUT') {
             const { id } = req.query;
             const { action, data } = req.body;
 
-            if (!id || !action) {
-                return res.status(400).json({ success: false, error: 'Missing required parameters' });
+            if (!id) {
+                return res.status(400).json({ success: false, error: 'Proposal ID required' });
             }
 
             const proposalRef = db.collection('proposals').doc(id);
-            const proposalDoc = await proposalRef.get();
+            const doc = await proposalRef.get();
 
-            if (!proposalDoc.exists) {
+            if (!doc.exists) {
                 return res.status(404).json({ success: false, error: 'Proposal not found' });
             }
 
-            const proposal = proposalDoc.data();
-            let updates = {};
-            let activityDetail = '';
+            const proposal = doc.data();
+            let updateData = {};
+            let activityDetails = '';
 
+            // Handle different actions based on index32 workflow
             switch (action) {
-                case 'update_estimation':
+                case 'add_estimation':
                     if (req.user.role !== 'estimator') {
-                        return res.status(403).json({ success: false, error: 'Only estimators can update estimation' });
+                        return res.status(403).json({ success: false, error: 'Only estimators can add estimation' });
                     }
-
-                    const { designHours, detailingHours, checkingHours, revisionHours, pmHours, totalHours, tonnage } = data;
-
-                    if ((!totalHours || totalHours === 0) && (!tonnage || tonnage === 0)) {
-                        return res.status(400).json({ success: false, error: 'Either Total Hours or Tonnage must be greater than 0' });
-                    }
-
-                    updates = {
+                    updateData = {
                         estimation: {
-                            designHours: designHours || 0,
-                            detailingHours: detailingHours || 0,
-                            checkingHours: checkingHours || 0,
-                            revisionHours: revisionHours || 0,
-                            pmHours: pmHours || 0,
-                            totalHours: totalHours || 0,
-                            tonnage: tonnage || 0,
-                            updatedBy: req.user.name,
-                            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                            ...data,
+                            estimatedBy: req.user.name,
+                            estimatedAt: admin.firestore.FieldValue.serverTimestamp()
                         },
-                        estimationCompleted: true
+                        status: 'pending_pricing',
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
                     };
-
-                    activityDetail = `Estimation updated: ${totalHours || 0} hours, ${tonnage || 0} tons`;
+                    activityDetails = `Estimation added by ${req.user.name}`;
                     break;
 
-                case 'add_pricing':
+                case 'set_pricing':
                     if (req.user.role !== 'coo') {
-                        return res.status(403).json({ success: false, error: 'Only COO can add pricing' });
+                        return res.status(403).json({ success: false, error: 'Only COO can set pricing' });
                     }
-
-                    const { projectNumber, quoteValue, currency, pricingNotes } = data;
-
-                    if (!projectNumber || !quoteValue) {
-                        return res.status(400).json({ success: false, error: 'Project Number and Quote Value are required' });
-                    }
-
-                    updates = {
+                    updateData = {
                         pricing: {
-                            projectNumber,
-                            quoteValue,
-                            currency: currency || 'USD',
-                            pricingNotes: pricingNotes || null,
-                            addedBy: req.user.name,
-                            addedAt: admin.firestore.FieldValue.serverTimestamp()
+                            ...data,
+                            pricedBy: req.user.name,
+                            pricedAt: admin.firestore.FieldValue.serverTimestamp()
                         },
-                        status: 'pending_approval'
+                        status: 'pending_director_approval',
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
                     };
-
-                    activityDetail = `Pricing added: ${currency || 'USD'} ${quoteValue}, Project #${projectNumber}`;
-
-                    await db.collection('notifications').add({
-                        type: 'approval_requested',
-                        recipientRole: 'director',
-                        proposalId: id,
-                        message: `Pricing added for "${proposal.projectName}". Awaiting approval.`,
-                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                        isRead: false,
-                        priority: 'high'
-                    });
+                    activityDetails = `Pricing set by ${req.user.name} - Quote: ${data.quoteValue} ${data.currency}`;
                     break;
 
-                case 'approve':
+                case 'director_approve':
                     if (req.user.role !== 'director') {
-                        return res.status(403).json({ success: false, error: 'Only Director can approve' });
+                        return res.status(403).json({ success: false, error: 'Only director can approve' });
                     }
-
-                    if (!data.comment) {
-                        return res.status(400).json({ success: false, error: 'Approval comment is required' });
-                    }
-
-                    updates = {
+                    updateData = {
+                        directorApproval: {
+                            approved: true,
+                            comments: data.comments || '',
+                            approvedBy: req.user.name,
+                            approvedAt: admin.firestore.FieldValue.serverTimestamp()
+                        },
                         status: 'approved',
-                        directorComment: data.comment,
-                        approvedBy: req.user.name,
-                        approvedAt: admin.firestore.FieldValue.serverTimestamp()
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
                     };
-
-                    activityDetail = `Approved: ${data.comment}`;
-
-                    await db.collection('notifications').add({
-                        type: 'proposal_approved',
-                        recipientRole: 'coo',
-                        proposalId: id,
-                        message: `Proposal "${proposal.projectName}" approved. Ready for allocation.`,
-                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                        isRead: false,
-                        priority: 'high'
-                    });
+                    activityDetails = `Proposal approved by ${req.user.name}`;
+                    if (data.comments) {
+                        activityDetails += ` - Comments: ${data.comments}`;
+                    }
                     break;
 
-                case 'reject':
+                case 'director_reject':
                     if (req.user.role !== 'director') {
-                        return res.status(403).json({ success: false, error: 'Only Director can reject' });
+                        return res.status(403).json({ success: false, error: 'Only director can reject' });
                     }
-
-                    if (!data.comment) {
-                        return res.status(400).json({ success: false, error: 'Rejection reason is required' });
-                    }
-
-                    updates = {
-                        status: 'rejected',
-                        directorComment: data.comment,
-                        rejectedBy: req.user.name,
-                        rejectedAt: admin.firestore.FieldValue.serverTimestamp()
+                    updateData = {
+                        directorApproval: {
+                            approved: false,
+                            comments: data.comments || '',
+                            requiresRevisionBy: data.requiresRevisionBy || 'estimator',
+                            rejectedBy: req.user.name,
+                            rejectedAt: admin.firestore.FieldValue.serverTimestamp()
+                        },
+                        status: 'revision_required',
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
                     };
+                    activityDetails = `Revision requested by ${req.user.name} - Assigned to: ${data.requiresRevisionBy} - Reason: ${data.comments}`;
+                    break;
 
-                    activityDetail = `Rejected: ${data.comment}`;
-
-                    if (proposal.createdByUid) {
-                        await db.collection('notifications').add({
-                            type: 'proposal_rejected',
-                            recipientUid: proposal.createdByUid,
-                            proposalId: id,
-                            message: `Proposal "${proposal.projectName}" rejected: ${data.comment}`,
-                            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                            isRead: false,
-                            priority: 'high'
-                        });
+                case 'submit_to_client':
+                    if (req.user.role !== 'bdm') {
+                        return res.status(403).json({ success: false, error: 'Only BDM can submit to client' });
                     }
+                    updateData = {
+                        clientSubmission: {
+                            method: data.method || 'Email',
+                            submittedBy: req.user.name,
+                            submittedAt: admin.firestore.FieldValue.serverTimestamp()
+                        },
+                        status: 'submitted_to_client',
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                    };
+                    activityDetails = `Proposal submitted to client by ${req.user.name} via ${data.method}`;
+                    break;
+
+                case 'mark_job_won':
+                    if (req.user.role !== 'bdm') {
+                        return res.status(403).json({ success: false, error: 'Only BDM can mark job won' });
+                    }
+                    updateData = {
+                        jobOutcome: {
+                            outcome: 'won',
+                            markedBy: req.user.name,
+                            markedAt: admin.firestore.FieldValue.serverTimestamp()
+                        },
+                        status: 'won',
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                    };
+                    activityDetails = `🎉 Job marked as WON by ${req.user.name}`;
+                    break;
+
+                case 'mark_job_lost':
+                    if (req.user.role !== 'bdm') {
+                        return res.status(403).json({ success: false, error: 'Only BDM can mark job lost' });
+                    }
+                    updateData = {
+                        jobOutcome: {
+                            outcome: 'lost',
+                            reason: data.reason || '',
+                            markedBy: req.user.name,
+                            markedAt: admin.firestore.FieldValue.serverTimestamp()
+                        },
+                        status: 'lost',
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                    };
+                    activityDetails = `Job marked as LOST by ${req.user.name}`;
+                    if (data.reason) {
+                        activityDetails += ` - Reason: ${data.reason}`;
+                    }
+                    break;
+
+                case 'edit_proposal':
+                    // Allow BDM to edit their own proposals in certain statuses
+                    if (req.user.role !== 'bdm' || proposal.createdByUid !== req.user.uid) {
+                        return res.status(403).json({ success: false, error: 'Only the proposal creator can edit' });
+                    }
+                    updateData = {
+                        ...data,
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                    };
+                    activityDetails = `Proposal edited by ${req.user.name}`;
                     break;
 
                 default:
                     return res.status(400).json({ success: false, error: 'Invalid action' });
             }
 
-            updates.changeLog = admin.firestore.FieldValue.arrayUnion({ 
-                timestamp: new Date().toISOString(), 
-                action: action, 
-                performedByName: req.user.name, 
-                details: activityDetail
+            // Update the proposal
+            await proposalRef.update(updateData);
+
+            // Log activity
+            if (activityDetails) {
+                await db.collection('activities').add({
+                    type: 'proposal_update',
+                    proposalId: id,
+                    action: action,
+                    details: activityDetails,
+                    performedBy: req.user.uid,
+                    performedByName: req.user.name,
+                    performedByRole: req.user.role,
+                    timestamp: admin.firestore.FieldValue.serverTimestamp()
+                });
+            }
+
+            return res.status(200).json({ 
+                success: true, 
+                message: 'Proposal updated successfully',
+                data: { id, ...updateData }
             });
-            updates.updatedAt = admin.firestore.FieldValue.serverTimestamp();
-            
-            await proposalRef.update(updates);
-            
-            await db.collection('activities').add({
-                type: `proposal_${action}`, 
-                details: activityDetail, 
-                performedByName: req.user.name, 
-                performedByRole: req.user.role,
-                timestamp: admin.firestore.FieldValue.serverTimestamp(), 
-                proposalId: id, 
-                projectName: proposal.projectName
-            });
-            
-            return res.status(200).json({ success: true, message: 'Proposal updated successfully' });
         }
 
+        // ===== DELETE REQUEST - DELETE PROPOSAL =====
         if (req.method === 'DELETE') {
             const { id } = req.query;
-            
+
             if (!id) {
-                return res.status(400).json({ success: false, error: 'Missing proposal ID' });
+                return res.status(400).json({ success: false, error: 'Proposal ID required' });
             }
 
             const proposalRef = db.collection('proposals').doc(id);
-            const proposalDoc = await proposalRef.get();
-            
-            if (!proposalDoc.exists) {
+            const doc = await proposalRef.get();
+
+            if (!doc.exists) {
                 return res.status(404).json({ success: false, error: 'Proposal not found' });
             }
-            
-            const proposalData = proposalDoc.data();
-            
-            if (proposalData.createdByUid !== req.user.uid && req.user.role !== 'director') {
-                return res.status(403).json({ success: false, error: 'Unauthorized' });
+
+            const proposal = doc.data();
+
+            // Check permissions
+            const canDelete = req.user.role === 'director' || 
+                            (req.user.role === 'bdm' && 
+                             proposal.createdByUid === req.user.uid && 
+                             ['pending_estimation', 'revision_required'].includes(proposal.status));
+
+            if (!canDelete) {
+                return res.status(403).json({ success: false, error: 'Permission denied to delete this proposal' });
             }
 
-            const filesSnapshot = await db.collection('files').where('proposalId', '==', id).get();
-            if (!filesSnapshot.empty) {
-                const deletePromises = filesSnapshot.docs.map(doc => {
-                    const fileData = doc.data();
-                    if (fileData.fileType === 'link') {
-                        return doc.ref.delete();
+            // Delete associated files from storage
+            try {
+                const filesSnapshot = await db.collection('files')
+                    .where('proposalId', '==', id)
+                    .get();
+
+                const deletePromises = filesSnapshot.docs.map(async (fileDoc) => {
+                    const fileData = fileDoc.data();
+                    if (fileData.storagePath) {
+                        try {
+                            await bucket.file(fileData.storagePath).delete();
+                        } catch (err) {
+                            console.error(`Error deleting file ${fileData.storagePath}:`, err);
+                        }
                     }
-                    return Promise.all([
-                        bucket.file(fileData.fileName).delete().catch(err => console.warn('File not found:', fileData.fileName)),
-                        doc.ref.delete()
-                    ]);
+                    await fileDoc.ref.delete();
                 });
+
                 await Promise.all(deletePromises);
+            } catch (err) {
+                console.error('Error deleting associated files:', err);
             }
 
+            // Delete the proposal
             await proposalRef.delete();
-            
+
+            // Log activity
             await db.collection('activities').add({
                 type: 'proposal_deleted',
-                details: `Proposal deleted: ${proposalData.projectName}`,
+                proposalId: id,
+                details: `Proposal "${proposal.projectName}" deleted by ${req.user.name}`,
+                performedBy: req.user.uid,
                 performedByName: req.user.name,
                 performedByRole: req.user.role,
-                timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                proposalId: id
+                timestamp: admin.firestore.FieldValue.serverTimestamp()
             });
-            
-            return res.status(200).json({ success: true, message: 'Proposal deleted successfully' });
+
+            return res.status(200).json({ 
+                success: true, 
+                message: 'Proposal and associated files deleted successfully' 
+            });
         }
 
         return res.status(405).json({ success: false, error: 'Method not allowed' });
-        
+
     } catch (error) {
-        console.error('Proposals API error:', error);
-        return res.status(500).json({ success: false, error: 'Internal Server Error', message: error.message });
+        console.error('Error in proposals handler:', error);
+        return res.status(500).json({ 
+            success: false, 
+            error: 'Internal server error', 
+            details: error.message 
+        });
     }
 };
 

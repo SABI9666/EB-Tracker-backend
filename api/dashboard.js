@@ -1,183 +1,262 @@
-// api/dashboard.js - Complete dashboard handler with FIXED CORS
+// api/dashboard.js - Dashboard data handler
+const express = require('express');
+const router = express.Router();
 const admin = require('./_firebase-admin');
-const { verifyToken } = require('../middleware/auth');
-const util = require('util');
 
-const db = admin.firestore();
+// Optional: Authentication middleware
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
 
-// ✅ FIXED CORS CONFIGURATION
-const allowCors = fn => async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization');
-    // ✅ Removed credentials header - this was causing CORS to fail!
-    
-    if (req.method === 'OPTIONS') {
-        res.status(200).end();
-        return;
+    if (!token) {
+        // For development, you might want to skip auth
+        console.log('⚠️ No token provided, proceeding without auth');
+        return next();
     }
-    return await fn(req, res);
+
+    admin.auth().verifyIdToken(token)
+        .then(decodedToken => {
+            req.user = decodedToken;
+            next();
+        })
+        .catch(error => {
+            console.error('Token verification error:', error);
+            return res.status(401).json({
+                success: false,
+                error: 'Invalid token'
+            });
+        });
 };
 
-const handler = async (req, res) => {
-    console.log('📊 Dashboard request received');
-    console.log('   Method:', req.method);
-    console.log('   Headers:', req.headers.authorization ? 'Token present' : 'No token');
-    
-    if (req.method === 'GET') {
+// GET /api/dashboard - Get dashboard statistics
+router.get('/', async (req, res) => {
+    try {
+        console.log('📊 Dashboard data requested');
+
+        const db = admin.firestore();
+
+        // Initialize counters
+        let totalProposals = 0;
+        let activeProjects = 0;
+        let pendingTasks = 0;
+        let totalValue = 0;
+        let recentActivities = [];
+
         try {
-            // Verify authentication
-            await util.promisify(verifyToken)(req, res);
-            
-            const userRole = req.user.role;
-            const userUid = req.user.uid;
-            
-            console.log('   User:', req.user.name, '- Role:', userRole);
+            // Get proposals count
+            const proposalsSnapshot = await db.collection('proposals').get();
+            totalProposals = proposalsSnapshot.size;
 
-            // For BDMs, filter proposals to only their own
-            let proposalsQuery = db.collection('proposals');
-            if (userRole === 'bdm') {
-                proposalsQuery = proposalsQuery.where('createdByUid', '==', userUid);
-            }
-            
-            const proposalsSnapshot = await proposalsQuery.get();
-            const proposals = proposalsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            
-            console.log('   Proposals found:', proposals.length);
-
-            // Calculate statistics
-            const wonProposals = proposals.filter(p => p.status === 'submitted_to_client' || p.status === 'won');
-            const totalWonValue = wonProposals.reduce((sum, p) => sum + (p.pricing?.quoteValue || 0), 0);
-            const totalProposalsCount = proposals.length;
-            const winRate = totalProposalsCount > 0 ? ((wonProposals.length / totalProposalsCount) * 100).toFixed(0) : 0;
-            const avgMargin = wonProposals.length > 0 ? (wonProposals.reduce((sum, p) => sum + (p.pricing?.profitMargin || 0), 0) / wonProposals.length).toFixed(0) : 0;
-            const pipelineValue = proposals.filter(p => !['submitted_to_client', 'won', 'rejected', 'lost'].includes(p.status))
-                                         .reduce((sum, p) => sum + (p.pricing?.quoteValue || 0), 0);
-
-            // Get action items based on role
-            let actionItemsQuery;
-            switch(userRole) {
-                case 'estimator':
-                    actionItemsQuery = db.collection('proposals')
-                        .where('status', 'in', ['pending_estimation', 'revision_required']);
-                    break;
-                case 'coo':
-                    actionItemsQuery = db.collection('proposals').where('status', '==', 'pending_pricing');
-                    break;
-                case 'director':
-                    actionItemsQuery = db.collection('proposals').where('status', '==', 'pending_director_approval');
-                    break;
-                case 'bdm':
-                    actionItemsQuery = db.collection('proposals')
-                        .where('createdByUid', '==', userUid)
-                        .where('status', 'in', ['approved', 'revision_required']);
-                    break;
-                default:
-                    actionItemsQuery = null;
-            }
-            
-            let actionItems = [];
-            if (actionItemsQuery) {
-                const actionSnapshot = await actionItemsQuery.orderBy('createdAt', 'desc').get();
-                actionItems = actionSnapshot.docs.map(doc => {
-                    const data = doc.data();
-                    const typeMap = {
-                        'pending_estimation': 'estimation_required',
-                        'pending_pricing': 'pricing_required',
-                        'pending_director_approval': 'approval_required',
-                        'approved': 'ready_for_client',
-                        'revision_required': 'needs_revision'
-                    };
-                    return {
-                        proposalId: doc.id,
-                        projectName: data.projectName,
-                        clientCompany: data.clientCompany,
-                        type: typeMap[data.status],
-                        status: data.status
-                    };
-                });
-            }
-
-            // Get recent activities (filtered for BDMs)
-            let activitiesQuery = db.collection('activities').orderBy('timestamp', 'desc').limit(5);
-            if (userRole === 'bdm') {
-                const proposalIds = proposals.map(p => p.id);
-                if (proposalIds.length > 0) {
-                    activitiesQuery = activitiesQuery.where('proposalId', 'in', proposalIds.slice(0, 10));
+            // Calculate total value from proposals
+            proposalsSnapshot.forEach(doc => {
+                const data = doc.data();
+                if (data.estimatedValue) {
+                    totalValue += parseFloat(data.estimatedValue) || 0;
                 }
-            }
-            
-            const activitiesSnapshot = await activitiesQuery.get();
-            const recentActivities = activitiesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            
-            // Build dashboard data based on role
-            let dashboardData = {};
-            
-            if (userRole === 'director') {
-                // Directors see all data
-                const allProposalsSnapshot = await db.collection('proposals').get();
-                const allProposals = allProposalsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                const allWonProposals = allProposals.filter(p => p.status === 'submitted_to_client' || p.status === 'won');
-                const allTotalWonValue = allWonProposals.reduce((sum, p) => sum + (p.pricing?.quoteValue || 0), 0);
-                const allPipelineValue = allProposals.filter(p => !['submitted_to_client', 'won', 'rejected', 'lost'].includes(p.status))
-                                                    .reduce((sum, p) => sum + (p.pricing?.quoteValue || 0), 0);
-                
-                dashboardData = {
-                    stats: {
-                        'Total Pipeline Value': `$${allPipelineValue.toLocaleString()}`,
-                        'Win Rate (YTD)': `${allProposals.length > 0 ? ((allWonProposals.length / allProposals.length) * 100).toFixed(0) : 0}%`,
-                        'Avg Profit Margin (YTD)': `${allWonProposals.length > 0 ? (allWonProposals.reduce((sum, p) => sum + (p.pricing?.profitMargin || 0), 0) / allWonProposals.length).toFixed(0) : 0}%`,
-                        'Strategic Projects Pending': actionItems.length
-                    },
-                    actionItems,
-                    executiveOverview: {
-                        'Booked Revenue': `$${allTotalWonValue.toLocaleString()}`,
-                        'Projects Won': allWonProposals.length,
-                        'Client Satisfaction': '92%',
-                        'Resource Utilization': '85%'
-                    },
-                    recentActivities
-                };
-            } else if (userRole === 'bdm') {
-                // BDMs see only their own data
-                dashboardData = {
-                    stats: {
-                        'My Active Proposals': proposals.filter(p => !['won','lost','rejected'].includes(p.status)).length,
-                        'My Pipeline Value': `$${pipelineValue.toLocaleString()}`,
-                        'My Proposals Won': wonProposals.length,
-                        'My Win Rate': `${winRate}%`,
-                    },
-                    actionItems,
-                    recentActivities
-                };
-            } else {
-                // Estimators and COOs see aggregate data
-                dashboardData = {
-                    stats: {
-                        'Active Proposals': proposals.filter(p => !['won','lost','rejected'].includes(p.status)).length,
-                        'Pipeline Value': `$${pipelineValue.toLocaleString()}`,
-                        'Proposals Won': wonProposals.length,
-                        'Win Rate': `${winRate}%`,
-                    },
-                    actionItems,
-                    recentActivities
-                };
-            }
-
-            console.log('✅ Dashboard data prepared');
-            return res.status(200).json({ success: true, data: dashboardData });
+            });
 
         } catch (error) {
-            console.error('❌ Dashboard API error:', error);
-            return res.status(500).json({ 
-                success: false, 
-                error: 'Internal Server Error', 
-                message: error.message 
-            });
+            console.log('ℹ️ Proposals collection not found or error:', error.message);
         }
-    } else {
-        return res.status(405).json({ success: false, error: 'Method not allowed' });
-    }
-};
 
-module.exports = allowCors(handler);
+        try {
+            // Get active projects count
+            const projectsSnapshot = await db.collection('projects')
+                .where('status', '==', 'active')
+                .get();
+            activeProjects = projectsSnapshot.size;
+
+        } catch (error) {
+            console.log('ℹ️ Projects collection not found or error:', error.message);
+        }
+
+        try {
+            // Get pending tasks count
+            const tasksSnapshot = await db.collection('tasks')
+                .where('status', '==', 'pending')
+                .get();
+            pendingTasks = tasksSnapshot.size;
+
+        } catch (error) {
+            console.log('ℹ️ Tasks collection not found or error:', error.message);
+        }
+
+        try {
+            // Get recent activities (last 10)
+            const activitiesSnapshot = await db.collection('activities')
+                .orderBy('timestamp', 'desc')
+                .limit(10)
+                .get();
+
+            activitiesSnapshot.forEach(doc => {
+                const data = doc.data();
+                recentActivities.push({
+                    id: doc.id,
+                    description: data.description || data.activity || 'Activity',
+                    user: data.user || data.createdBy || 'System',
+                    timestamp: data.timestamp || data.createdAt || new Date().toISOString(),
+                    status: data.status || 'completed',
+                    type: data.type || 'general'
+                });
+            });
+
+        } catch (error) {
+            console.log('ℹ️ Activities collection not found or error:', error.message);
+        }
+
+        // Build response
+        const dashboardData = {
+            success: true,
+            data: {
+                totalProposals,
+                activeProjects,
+                pendingTasks,
+                totalValue,
+                recentActivities,
+                lastUpdated: new Date().toISOString()
+            },
+            timestamp: new Date().toISOString()
+        };
+
+        console.log('✅ Dashboard data prepared:', {
+            proposals: totalProposals,
+            projects: activeProjects,
+            tasks: pendingTasks,
+            activities: recentActivities.length
+        });
+
+        res.json(dashboardData);
+
+    } catch (error) {
+        console.error('❌ Dashboard error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to load dashboard',
+            message: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error',
+            data: {
+                totalProposals: 0,
+                activeProjects: 0,
+                pendingTasks: 0,
+                totalValue: 0,
+                recentActivities: []
+            }
+        });
+    }
+});
+
+// GET /api/dashboard/stats - Get specific statistics
+router.get('/stats', async (req, res) => {
+    try {
+        const db = admin.firestore();
+        const stats = {};
+
+        // Get counts for different collections
+        const collections = ['proposals', 'projects', 'tasks', 'submissions', 'payments'];
+        
+        for (const collection of collections) {
+            try {
+                const snapshot = await db.collection(collection).get();
+                stats[collection] = snapshot.size;
+            } catch (error) {
+                stats[collection] = 0;
+            }
+        }
+
+        res.json({
+            success: true,
+            data: stats,
+            timestamp: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error('Stats error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to load statistics'
+        });
+    }
+});
+
+// GET /api/dashboard/role/:role - Get role-specific dashboard
+router.get('/role/:role', async (req, res) => {
+    try {
+        const { role } = req.params;
+        const db = admin.firestore();
+
+        console.log(`📊 Loading dashboard for role: ${role}`);
+
+        // Customize data based on role
+        let dashboardData = {
+            success: true,
+            role: role,
+            data: {},
+            timestamp: new Date().toISOString()
+        };
+
+        switch (role) {
+            case 'estimator':
+                // Get proposals assigned to estimator
+                const estimatorProposals = await db.collection('proposals')
+                    .where('status', 'in', ['pending', 'in_review'])
+                    .get();
+                
+                dashboardData.data = {
+                    pendingProposals: estimatorProposals.size,
+                    message: 'Estimator dashboard'
+                };
+                break;
+
+            case 'coo':
+            case 'director':
+                // Get overview of everything
+                const allProposals = await db.collection('proposals').get();
+                const allProjects = await db.collection('projects').get();
+                
+                dashboardData.data = {
+                    totalProposals: allProposals.size,
+                    totalProjects: allProjects.size,
+                    message: 'Executive dashboard'
+                };
+                break;
+
+            case 'designer':
+            case 'design_lead':
+                // Get design tasks
+                const designTasks = await db.collection('tasks')
+                    .where('department', '==', 'design')
+                    .get();
+                
+                dashboardData.data = {
+                    designTasks: designTasks.size,
+                    message: 'Design dashboard'
+                };
+                break;
+
+            case 'accounts':
+                // Get payment and financial data
+                const payments = await db.collection('payments').get();
+                
+                dashboardData.data = {
+                    totalPayments: payments.size,
+                    message: 'Accounts dashboard'
+                };
+                break;
+
+            default:
+                dashboardData.data = {
+                    message: 'Generic dashboard'
+                };
+        }
+
+        res.json(dashboardData);
+
+    } catch (error) {
+        console.error('Role dashboard error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to load role-specific dashboard'
+        });
+    }
+});
+
+module.exports = router;

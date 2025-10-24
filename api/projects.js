@@ -165,16 +165,6 @@ const handler = async (req, res) => {
                 
                 const proposal = proposalDoc.data();
                 
-                console.log('Creating project from proposal:', proposalId);
-                console.log('Proposal data check:', {
-                    projectName: proposal.projectName,
-                    createdByName: proposal.createdByName,
-                    createdByEmail: proposal.createdByEmail,
-                    bdmEmail: proposal.bdmEmail,
-                    hasCreatedByEmail: !!proposal.createdByEmail,
-                    hasBdmEmail: !!proposal.bdmEmail
-                });
-                
                 // Check if proposal is won
                 if (proposal.status !== 'won') {
                     return res.status(400).json({ 
@@ -209,6 +199,8 @@ const handler = async (req, res) => {
                     currency: proposal.pricing?.currency || 'USD',
                     status: 'pending', // Will be 'assigned' when allocated to design lead
                     designStatus: 'not_started',
+                    allocatedHours: 0, // Will be set when designers are assigned
+                    hoursLogged: 0, // Initialize to 0
                     createdAt: admin.firestore.FieldValue.serverTimestamp(),
                     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
                     createdByName: req.user.name,
@@ -216,9 +208,8 @@ const handler = async (req, res) => {
                     createdByRole: req.user.role
                 };
                 
-                // Sanitize to remove any undefined values before saving to Firestore
+                // Sanitize to remove any undefined values
                 const sanitizedProjectData = sanitizeForFirestore(projectData);
-                console.log('Sanitized project data ready for Firestore');
                 
                 const projectRef = await db.collection('projects').add(sanitizedProjectData);
                 
@@ -294,6 +285,14 @@ const handler = async (req, res) => {
                     return res.status(400).json({ 
                         success: false, 
                         error: 'Design Lead UID is required' 
+                    });
+                }
+                
+                // Validate allocation notes - REQUIRED field
+                if (!data.allocationNotes || data.allocationNotes.trim() === '') {
+                    return res.status(400).json({ 
+                        success: false, 
+                        error: 'Allocation notes are required' 
                     });
                 }
                 
@@ -378,7 +377,16 @@ const handler = async (req, res) => {
                 }
                 
                 const designerUids = data.designerUids || [];
+                const allocatedHours = data.allocatedHours || 0; // NEW: Total hours allocated
                 const validatedDesigners = [];
+                
+                // Validation for allocated hours
+                if (allocatedHours < 0) {
+                    return res.status(400).json({
+                        success: false,
+                        error: 'Allocated hours must be a positive number'
+                    });
+                }
                 
                 // Validate all designers from database
                 for (const uid of designerUids) {
@@ -410,11 +418,13 @@ const handler = async (req, res) => {
                     assignmentDate: admin.firestore.FieldValue.serverTimestamp(),
                     assignedBy: req.user.name,
                     assignedByUid: req.user.uid,
+                    allocatedHours: allocatedHours, // NEW: Store allocated hours
+                    hoursLogged: 0, // Initialize hours logged
                     status: 'in_progress',
                     designStatus: 'in_progress'
                 };
                 
-                activityDetail = `Designers assigned: ${validatedDesigners.map(d => d.name).join(', ')}`;
+                activityDetail = `Designers assigned: ${validatedDesigners.map(d => d.name).join(', ')} with ${allocatedHours} hours allocated`;
                 
                 // Notify each designer
                 for (const designer of validatedDesigners) {
@@ -422,11 +432,12 @@ const handler = async (req, res) => {
                         type: 'project_assigned',
                         recipientUid: designer.uid,
                         recipientRole: 'designer',
-                        message: `New project assigned: "${project.projectName}"`,
+                        message: `New project assigned: "${project.projectName}" (${allocatedHours} hours allocated)`,
                         projectId: id,
                         projectName: project.projectName,
                         clientCompany: project.clientCompany,
                         assignedBy: req.user.name,
+                        allocatedHours: allocatedHours,
                         priority: 'high'
                     });
                 }

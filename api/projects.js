@@ -255,6 +255,12 @@ const handler = async (req, res) => {
             
             // FIXED: Changed from 'allocate_design_lead' to 'allocate_to_design_lead' to match frontend
             if (action === 'allocate_to_design_lead' || action === 'allocate_design_lead') {
+                console.log('=== PROJECT ALLOCATION REQUEST ===');
+                console.log('Action:', action);
+                console.log('Project ID:', id);
+                console.log('Request User:', req.user.name, '-', req.user.role);
+                console.log('Data received:', JSON.stringify(data, null, 2));
+                
                 // Only COO or Director can allocate
                 if (!['coo', 'director'].includes(req.user.role)) {
                     return res.status(403).json({ 
@@ -269,6 +275,14 @@ const handler = async (req, res) => {
                     return res.status(400).json({ 
                         success: false, 
                         error: 'Design Lead UID is required' 
+                    });
+                }
+                
+                // Validate allocation notes - REQUIRED field
+                if (!data.allocationNotes || data.allocationNotes.trim() === '') {
+                    return res.status(400).json({ 
+                        success: false, 
+                        error: 'Allocation notes are required' 
                     });
                 }
                 
@@ -299,14 +313,20 @@ const handler = async (req, res) => {
                     allocatedByUid: req.user.uid,
                     projectStartDate: data.projectStartDate || admin.firestore.FieldValue.serverTimestamp(),
                     targetCompletionDate: data.targetCompletionDate || null,
-                    allocationNotes: data.allocationNotes || '',
-                    specialInstructions: data.specialInstructions || '',
+                    allocationNotes: data.allocationNotes.trim(), // Required field, already validated
+                    specialInstructions: data.specialInstructions ? data.specialInstructions.trim() : '',
                     priority: data.priority || 'Normal',
                     status: 'assigned',
                     designStatus: 'allocated'
                 };
                 
                 activityDetail = `Project allocated to Design Lead: ${designLeadData.name} by ${req.user.name}`;
+                
+                console.log('Allocation successful:', {
+                    projectId: id,
+                    designLead: designLeadData.name,
+                    allocatedBy: req.user.name
+                });
                 
                 // Notify the Design Lead
                 notifications.push({

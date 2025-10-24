@@ -1,4 +1,4 @@
-// api/projects.js - Updated with Proper Allocation Workflow
+// api/projects.js - Fixed with proper action handling
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
@@ -55,7 +55,7 @@ const handler = async (req, res) => {
                 
                 const projectData = { id: doc.id, ...doc.data() };
                 
-                // FIX 3: Check access based on role and allocation
+                // Check access based on role and allocation
                 if (req.user.role === 'design_lead' && projectData.designLeadUid !== req.user.uid) {
                     return res.status(403).json({ 
                         success: false, 
@@ -97,9 +97,8 @@ const handler = async (req, res) => {
             // Get projects based on role
             let query = db.collection('projects').orderBy('createdAt', 'desc');
             
-            // FIX 4: Strict visibility control for Design Leads
+            // Design Leads ONLY see projects allocated to them by COO
             if (req.user.role === 'design_lead') {
-                // Design Leads ONLY see projects allocated to them by COO
                 query = query.where('designLeadUid', '==', req.user.uid)
                             .where('status', 'in', ['assigned', 'in_progress', 'completed']);
             }
@@ -120,6 +119,115 @@ const handler = async (req, res) => {
             const projects = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             
             return res.status(200).json({ success: true, data: projects });
+        }
+
+        // ============================================
+        // POST - Create project from proposal
+        // ============================================
+        if (req.method === 'POST') {
+            const { action, proposalId } = req.body;
+            
+            if (action === 'create_from_proposal') {
+                // Only COO or Director can create projects
+                if (!['coo', 'director'].includes(req.user.role)) {
+                    return res.status(403).json({ 
+                        success: false, 
+                        error: 'Only COO or Director can create projects' 
+                    });
+                }
+                
+                if (!proposalId) {
+                    return res.status(400).json({ 
+                        success: false, 
+                        error: 'Proposal ID is required' 
+                    });
+                }
+                
+                // Get proposal data
+                const proposalDoc = await db.collection('proposals').doc(proposalId).get();
+                if (!proposalDoc.exists) {
+                    return res.status(404).json({ 
+                        success: false, 
+                        error: 'Proposal not found' 
+                    });
+                }
+                
+                const proposal = proposalDoc.data();
+                
+                // Check if proposal is won
+                if (proposal.status !== 'won') {
+                    return res.status(400).json({ 
+                        success: false, 
+                        error: 'Only WON proposals can be converted to projects' 
+                    });
+                }
+                
+                // Check if project already exists
+                if (proposal.projectCreated && proposal.projectId) {
+                    return res.status(400).json({ 
+                        success: false, 
+                        error: 'Project already exists for this proposal',
+                        projectId: proposal.projectId 
+                    });
+                }
+                
+                // Create the project
+                const projectData = {
+                    proposalId: proposalId,
+                    projectName: proposal.projectName,
+                    projectCode: proposal.pricing?.projectNumber || 'PENDING',
+                    clientCompany: proposal.clientCompany,
+                    clientContact: proposal.clientContact || '',
+                    clientEmail: proposal.clientEmail || '',
+                    clientPhone: proposal.clientPhone || '',
+                    location: proposal.location || '',
+                    bdmName: proposal.createdByName,
+                    bdmUid: proposal.createdByUid,
+                    bdmEmail: proposal.createdByEmail,
+                    quoteValue: proposal.pricing?.quoteValue || 0,
+                    currency: proposal.pricing?.currency || 'USD',
+                    status: 'pending', // Will be 'assigned' when allocated to design lead
+                    designStatus: 'not_started',
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                    createdByName: req.user.name,
+                    createdByUid: req.user.uid,
+                    createdByRole: req.user.role
+                };
+                
+                const projectRef = await db.collection('projects').add(projectData);
+                
+                // Update proposal with project reference
+                await db.collection('proposals').doc(proposalId).update({
+                    projectCreated: true,
+                    projectId: projectRef.id,
+                    projectCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+                
+                // Log activity
+                await db.collection('activities').add({
+                    type: 'project_created',
+                    details: `Project created from proposal: ${proposal.projectName}`,
+                    performedByName: req.user.name,
+                    performedByRole: req.user.role,
+                    performedByUid: req.user.uid,
+                    timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                    projectId: projectRef.id,
+                    proposalId: proposalId
+                });
+                
+                return res.status(200).json({ 
+                    success: true, 
+                    message: 'Project created successfully',
+                    projectId: projectRef.id 
+                });
+            }
+            
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Invalid action' 
+            });
         }
 
         // ============================================
@@ -145,8 +253,8 @@ const handler = async (req, res) => {
             let activityDetail = '';
             let notifications = [];
             
-            // FIX 2: COO allocation with actual Design Lead user from database
-            if (action === 'allocate_to_design_lead') {
+            // FIXED: Changed from 'allocate_design_lead' to 'allocate_to_design_lead' to match frontend
+            if (action === 'allocate_to_design_lead' || action === 'allocate_design_lead') {
                 // Only COO or Director can allocate
                 if (!['coo', 'director'].includes(req.user.role)) {
                     return res.status(403).json({ 
@@ -192,6 +300,8 @@ const handler = async (req, res) => {
                     projectStartDate: data.projectStartDate || admin.firestore.FieldValue.serverTimestamp(),
                     targetCompletionDate: data.targetCompletionDate || null,
                     allocationNotes: data.allocationNotes || '',
+                    specialInstructions: data.specialInstructions || '',
+                    priority: data.priority || 'Normal',
                     status: 'assigned',
                     designStatus: 'allocated'
                 };
@@ -335,6 +445,63 @@ const handler = async (req, res) => {
             });
         }
 
+        // ============================================
+        // DELETE - Delete project (COO/Director only)
+        // ============================================
+        if (req.method === 'DELETE') {
+            const { id } = req.query;
+            
+            if (!id) {
+                return res.status(400).json({ success: false, error: 'Missing project ID' });
+            }
+            
+            // Only COO or Director can delete projects
+            if (!['coo', 'director'].includes(req.user.role)) {
+                return res.status(403).json({ 
+                    success: false, 
+                    error: 'Only COO or Director can delete projects' 
+                });
+            }
+            
+            const projectRef = db.collection('projects').doc(id);
+            const projectDoc = await projectRef.get();
+            
+            if (!projectDoc.exists) {
+                return res.status(404).json({ success: false, error: 'Project not found' });
+            }
+            
+            const project = projectDoc.data();
+            
+            // Delete the project
+            await projectRef.delete();
+            
+            // If there's a linked proposal, update it
+            if (project.proposalId) {
+                await db.collection('proposals').doc(project.proposalId).update({
+                    projectCreated: false,
+                    projectId: null,
+                    allocationStatus: null,
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+            }
+            
+            // Log activity
+            await db.collection('activities').add({
+                type: 'project_deleted',
+                details: `Project deleted: ${project.projectName}`,
+                performedByName: req.user.name,
+                performedByRole: req.user.role,
+                performedByUid: req.user.uid,
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                projectId: id
+            });
+            
+            return res.status(200).json({ 
+                success: true, 
+                message: 'Project deleted successfully' 
+            });
+        }
+
         return res.status(405).json({ success: false, error: 'Method not allowed' });
         
     } catch (error) {
@@ -348,27 +515,3 @@ const handler = async (req, res) => {
 };
 
 module.exports = allowCors(handler);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

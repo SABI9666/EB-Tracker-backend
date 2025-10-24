@@ -17,6 +17,17 @@ const allowCors = fn => async (req, res) => {
     return await fn(req, res);
 };
 
+// Helper function to remove undefined values from objects before Firestore
+function sanitizeForFirestore(obj) {
+    const sanitized = {};
+    for (const [key, value] of Object.entries(obj)) {
+        if (value !== undefined) {
+            sanitized[key] = value;
+        }
+    }
+    return sanitized;
+}
+
 const handler = async (req, res) => {
     try {
         await util.promisify(verifyToken)(req, res);
@@ -154,6 +165,16 @@ const handler = async (req, res) => {
                 
                 const proposal = proposalDoc.data();
                 
+                console.log('Creating project from proposal:', proposalId);
+                console.log('Proposal data check:', {
+                    projectName: proposal.projectName,
+                    createdByName: proposal.createdByName,
+                    createdByEmail: proposal.createdByEmail,
+                    bdmEmail: proposal.bdmEmail,
+                    hasCreatedByEmail: !!proposal.createdByEmail,
+                    hasBdmEmail: !!proposal.bdmEmail
+                });
+                
                 // Check if proposal is won
                 if (proposal.status !== 'won') {
                     return res.status(400).json({ 
@@ -181,9 +202,9 @@ const handler = async (req, res) => {
                     clientEmail: proposal.clientEmail || '',
                     clientPhone: proposal.clientPhone || '',
                     location: proposal.location || '',
-                    bdmName: proposal.createdByName,
-                    bdmUid: proposal.createdByUid,
-                    bdmEmail: proposal.createdByEmail,
+                    bdmName: proposal.createdByName || 'Unknown',
+                    bdmUid: proposal.createdByUid || '',
+                    bdmEmail: proposal.createdByEmail || proposal.bdmEmail || '',
                     quoteValue: proposal.pricing?.quoteValue || 0,
                     currency: proposal.pricing?.currency || 'USD',
                     status: 'pending', // Will be 'assigned' when allocated to design lead
@@ -195,7 +216,11 @@ const handler = async (req, res) => {
                     createdByRole: req.user.role
                 };
                 
-                const projectRef = await db.collection('projects').add(projectData);
+                // Sanitize to remove any undefined values before saving to Firestore
+                const sanitizedProjectData = sanitizeForFirestore(projectData);
+                console.log('Sanitized project data ready for Firestore');
+                
+                const projectRef = await db.collection('projects').add(sanitizedProjectData);
                 
                 // Update proposal with project reference
                 await db.collection('proposals').doc(proposalId).update({
@@ -255,12 +280,6 @@ const handler = async (req, res) => {
             
             // FIXED: Changed from 'allocate_design_lead' to 'allocate_to_design_lead' to match frontend
             if (action === 'allocate_to_design_lead' || action === 'allocate_design_lead') {
-                console.log('=== PROJECT ALLOCATION REQUEST ===');
-                console.log('Action:', action);
-                console.log('Project ID:', id);
-                console.log('Request User:', req.user.name, '-', req.user.role);
-                console.log('Data received:', JSON.stringify(data, null, 2));
-                
                 // Only COO or Director can allocate
                 if (!['coo', 'director'].includes(req.user.role)) {
                     return res.status(403).json({ 
@@ -275,14 +294,6 @@ const handler = async (req, res) => {
                     return res.status(400).json({ 
                         success: false, 
                         error: 'Design Lead UID is required' 
-                    });
-                }
-                
-                // Validate allocation notes - REQUIRED field
-                if (!data.allocationNotes || data.allocationNotes.trim() === '') {
-                    return res.status(400).json({ 
-                        success: false, 
-                        error: 'Allocation notes are required' 
                     });
                 }
                 
@@ -313,20 +324,14 @@ const handler = async (req, res) => {
                     allocatedByUid: req.user.uid,
                     projectStartDate: data.projectStartDate || admin.firestore.FieldValue.serverTimestamp(),
                     targetCompletionDate: data.targetCompletionDate || null,
-                    allocationNotes: data.allocationNotes.trim(), // Required field, already validated
-                    specialInstructions: data.specialInstructions ? data.specialInstructions.trim() : '',
+                    allocationNotes: data.allocationNotes || '',
+                    specialInstructions: data.specialInstructions || '',
                     priority: data.priority || 'Normal',
                     status: 'assigned',
                     designStatus: 'allocated'
                 };
                 
                 activityDetail = `Project allocated to Design Lead: ${designLeadData.name} by ${req.user.name}`;
-                
-                console.log('Allocation successful:', {
-                    projectId: id,
-                    designLead: designLeadData.name,
-                    allocatedBy: req.user.name
-                });
                 
                 // Notify the Design Lead
                 notifications.push({

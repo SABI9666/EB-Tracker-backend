@@ -362,7 +362,9 @@ const handler = async (req, res) => {
                             pricedByUid: req.user.uid,
                             pricedAt: new Date().toISOString()
                         },
-                        status: 'pricing_complete'
+                        // CHANGED: Use pending_approval instead of pricing_complete
+                        // This ensures Director sees it in the Approve/Reject section
+                        status: 'pending_approval'
                     };
                         
                     activityDetail = `Pricing added: ${data.currency} ${data.quoteValue} - Project Number: ${data.projectNumber}`;
@@ -373,20 +375,21 @@ const handler = async (req, res) => {
                         recipientUid: proposal.createdByUid,
                         recipientRole: 'bdm',
                         proposalId: id,
-                        message: `Pricing ready for ${proposal.projectName} - Project #${data.projectNumber}. Ready to submit to client.`,
+                        message: `Pricing ready for ${proposal.projectName} - Project #${data.projectNumber}.`,
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        isRead: false,
+                        priority: 'normal'
+                    });
+                        
+                    // CHANGED: Notify Director with clearer message about needing approval
+                    await db.collection('notifications').add({
+                        type: 'pricing_complete_needs_approval',
+                        recipientRole: 'director',
+                        proposalId: id,
+                        message: `COO completed pricing for ${proposal.projectName} - ${data.currency} ${data.quoteValue}. Awaiting your approval.`,
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         isRead: false,
                         priority: 'high'
-                    });
-                        
-                    // Also notify Director
-                    await db.collection('notifications').add({
-                        type: 'pricing_complete',
-                        recipientRole: 'director',
-                        proposalId: id,
-                        message: `COO completed pricing for ${proposal.projectName} - ${data.currency} ${data.quoteValue}`,
-                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                        isRead: false
                     });
                     break;
                     
@@ -398,7 +401,8 @@ const handler = async (req, res) => {
                         });
                     }
                     
-                    if (proposal.status !== 'pricing_complete' && proposal.status !== 'approved') {
+                    // CHANGED: Check for pending_approval instead of pricing_complete
+                    if (proposal.status !== 'pending_approval' && proposal.status !== 'approved') {
                          return res.status(400).json({ 
                              success: false, 
                              error: 'Proposal must have pricing complete or be approved by Director before submission' 

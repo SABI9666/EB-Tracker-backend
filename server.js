@@ -1,4 +1,4 @@
-// server.js - Complete backend entry point with FIXED CORS
+// server.js - Complete backend entry point with FIXED CORS + TIMESHEET API
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -119,7 +119,11 @@ app.get('/', (req, res) => {
             'POST /api/payments - Create payment',
             'GET  /api/notifications - List notifications',
             'GET  /api/users - List users',
-            'POST /api/users - Create user'
+            'POST /api/users - Create user',
+            'GET  /api/timesheets - List timesheets',
+            'POST /api/timesheets - Log hours',
+            'PUT  /api/timesheets - Update timesheet',
+            'DELETE /api/timesheets - Delete timesheet'
         ]
     });
 });
@@ -142,6 +146,7 @@ try {
     const filesHandler = require('./api/files');
     const deliverablesHandler = require('./api/deliverables');
     const usersHandler = require('./api/users');
+    const timesheetsHandler = require('./api/timesheets');  // NEW - Timesheet API
 
     console.log('✅ All handlers loaded successfully');
 
@@ -157,6 +162,7 @@ try {
     app.all('/api/files', filesHandler);
     app.all('/api/deliverables', deliverablesHandler);
     app.all('/api/users', usersHandler);
+    app.all('/api/timesheets', timesheetsHandler);  // NEW - Timesheet routes
 
     console.log('✅ All routes registered');
 
@@ -207,6 +213,8 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('   GET  /api/proposals');
     console.log('   GET  /api/projects');
     console.log('   GET  /api/activities');
+    console.log('   GET  /api/timesheets        ⏱️  NEW');
+    console.log('   POST /api/timesheets        ⏱️  NEW');
     console.log('   ... and more');
     console.log('');
 });
@@ -231,3 +239,5 @@ process.on('SIGINT', () => {
 });
 
 module.exports = app;
+
+

@@ -1,4 +1,4 @@
-// server.js - Complete backend entry point with FIXED CORS + TIMESHEET API
+// server.js - Complete backend entry point with FIXED CORS + TIMESHEET + VARIATIONS API
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -108,6 +108,7 @@ app.get('/', (req, res) => {
             'POST /api/proposals - Create proposal',
             'GET  /api/projects - List projects',
             'POST /api/projects - Create project',
+            'GET  /api/projects?action=generate-variation-code - Generate variation code',
             'GET  /api/files - List files',
             'POST /api/files - Upload files',
             'GET  /api/activities - Activity log',
@@ -123,7 +124,8 @@ app.get('/', (req, res) => {
             'GET  /api/timesheets - List timesheets',
             'POST /api/timesheets - Log hours',
             'PUT  /api/timesheets - Update timesheet',
-            'DELETE /api/timesheets - Delete timesheet'
+            'DELETE /api/timesheets - Delete timesheet',
+            'POST /api/variations - Create a new variation'
         ]
     });
 });
@@ -146,7 +148,8 @@ try {
     const filesHandler = require('./api/files');
     const deliverablesHandler = require('./api/deliverables');
     const usersHandler = require('./api/users');
-    const timesheetsHandler = require('./api/timesheets');  // NEW - Timesheet API
+    const timesheetsHandler = require('./api/timesheets');
+    const variationsHandler = require('./api/variations'); // <-- NEW: Import variations handler
 
     console.log('✅ All handlers loaded successfully');
 
@@ -162,7 +165,8 @@ try {
     app.all('/api/files', filesHandler);
     app.all('/api/deliverables', deliverablesHandler);
     app.all('/api/users', usersHandler);
-    app.all('/api/timesheets', timesheetsHandler);  // NEW - Timesheet routes
+    app.all('/api/timesheets', timesheetsHandler);
+    app.all('/api/variations', variationsHandler); // <-- NEW: Register variations route
 
     console.log('✅ All routes registered');
 
@@ -215,6 +219,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('   GET  /api/activities');
     console.log('   GET  /api/timesheets        ⏱️  NEW');
     console.log('   POST /api/timesheets        ⏱️  NEW');
+    console.log('   POST /api/variations        ✨  NEW');
     console.log('   ... and more');
     console.log('');
 });
@@ -239,5 +244,3 @@ process.on('SIGINT', () => {
 });
 
 module.exports = app;
-
-

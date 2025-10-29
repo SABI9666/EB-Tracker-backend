@@ -124,7 +124,7 @@ app.get('/', (req, res) => {
             'POST /api/timesheets - Log hours',
             'PUT  /api/timesheets - Update timesheet',
             'DELETE /api/timesheets - Delete timesheet',
-            'GET  /api/monitoring/executive-summary - Executive summary data' // Added to list
+            'GET  /api/executive-summary - Executive summary data' // <-- LINE ADDED
         ]
     });
 });
@@ -147,10 +147,8 @@ try {
     const filesHandler = require('./api/files');
     const deliverablesHandler = require('./api/deliverables');
     const usersHandler = require('./api/users');
-    const timesheetsHandler = require('./api/timesheets');
-
-    // === 1. ADD THIS LINE ===
-    const executiveSummaryHandler = require('./api/monitoring/executive-summary');
+    const timesheetsHandler = require('./api/timesheets');  // NEW - Timesheet API
+    const executiveSummaryHandler = require('./api/executive-summary'); // <-- LINE ADDED
 
     console.log('✅ All handlers loaded successfully');
 
@@ -166,10 +164,8 @@ try {
     app.all('/api/files', filesHandler);
     app.all('/api/deliverables', deliverablesHandler);
     app.all('/api/users', usersHandler);
-    app.all('/api/timesheets', timesheetsHandler);
-
-    // === 2. ADD THIS LINE ===
-    app.all('/api/monitoring/executive-summary', executiveSummaryHandler);
+    app.all('/api/timesheets', timesheetsHandler);  // NEW - Timesheet routes
+    app.all('/api/executive-summary', executiveSummaryHandler); // <-- LINE ADDED
 
     console.log('✅ All routes registered');
 
@@ -221,7 +217,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('   GET  /api/projects');
     console.log('   GET  /api/activities');
     console.log('   GET  /api/timesheets        ⏱️  NEW');
-    console.log('   GET  /api/monitoring/executive-summary   💼  NEW'); // Added to log
+    console.log('   GET  /api/executive-summary   💼  NEW'); // <-- LINE ADDED
     console.log('   ... and more');
     console.log('');
 });

@@ -1,4 +1,4 @@
-// api/projects.js - Fixed with proper action handling
+// api/projects.js - Fixed with proper hour allocation logic
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
@@ -199,8 +199,13 @@ const handler = async (req, res) => {
                     currency: proposal.pricing?.currency || 'USD',
                     status: 'pending', // Will be 'assigned' when allocated to design lead
                     designStatus: 'not_started',
-                    allocatedHours: 0, // Will be set when designers are assigned
-                    hoursLogged: 0, // Initialize to 0
+                    
+                    // Initialize all hour fields
+                    maxAllocatedHours: 0,
+                    additionalHours: 0,
+                    totalAllocatedHours: 0,
+                    hoursLogged: 0,
+                    
                     createdAt: admin.firestore.FieldValue.serverTimestamp(),
                     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
                     createdByName: req.user.name,
@@ -313,6 +318,15 @@ const handler = async (req, res) => {
                     });
                 }
                 
+                // ================== FIX 1: Save Hours from COO ==================
+                const maxAllocatedHours = parseFloat(data.maxAllocatedHours || 0);
+                if (maxAllocatedHours <= 0) {
+                     return res.status(400).json({ 
+                        success: false, 
+                        error: 'Max Allocated Hours must be greater than 0' 
+                    });
+                }
+                
                 // Update project with actual Design Lead info
                 updates = {
                     designLeadName: designLeadData.name,
@@ -327,17 +341,22 @@ const handler = async (req, res) => {
                     specialInstructions: data.specialInstructions || '',
                     priority: data.priority || 'Normal',
                     status: 'assigned',
-                    designStatus: 'allocated'
+                    designStatus: 'allocated',
+                    
+                    // === ADDED THESE FIELDS ===
+                    maxAllocatedHours: maxAllocatedHours,
+                    additionalHours: parseFloat(data.additionalHours || 0)
+                    // ==========================
                 };
                 
-                activityDetail = `Project allocated to Design Lead: ${designLeadData.name} by ${req.user.name}`;
+                activityDetail = `Project allocated to Design Lead: ${designLeadData.name} by ${req.user.name} with ${maxAllocatedHours} hours.`;
                 
                 // Notify the Design Lead
                 notifications.push({
                     type: 'project_allocated',
                     recipientUid: designLeadUid,
                     recipientRole: 'design_lead',
-                    message: `New project allocated: "${project.projectName}" for ${project.clientCompany}`,
+                    message: `New project allocated: "${project.projectName}" (${maxAllocatedHours} hours)`,
                     projectId: id,
                     projectName: project.projectName,
                     clientCompany: project.clientCompany,
@@ -376,15 +395,20 @@ const handler = async (req, res) => {
                     });
                 }
                 
+                // ================== FIX 2: Get correct hour data ==================
                 const designerUids = data.designerUids || [];
-                const allocatedHours = data.allocatedHours || 0; // NEW: Total hours allocated
+                const designerHoursMap = data.designerHours || {}; // e.g., { "uid1": 8, "uid2": 10 }
+                const totalAllocatedHours = data.totalAllocatedHours || 0; // Total
+                // ===================================================================
+                
                 const validatedDesigners = [];
                 
                 // Validation for allocated hours
-                if (allocatedHours < 0) {
+                const maxHours = (project.maxAllocatedHours || 0) + (project.additionalHours || 0);
+                if (maxHours > 0 && totalAllocatedHours > maxHours) {
                     return res.status(400).json({
                         success: false,
-                        error: 'Allocated hours must be a positive number'
+                        error: `Total allocated hours (${totalAllocatedHours}) exceeds available budget (${maxHours})`
                     });
                 }
                 
@@ -418,13 +442,18 @@ const handler = async (req, res) => {
                     assignmentDate: admin.firestore.FieldValue.serverTimestamp(),
                     assignedBy: req.user.name,
                     assignedByUid: req.user.uid,
-                    allocatedHours: allocatedHours, // NEW: Store allocated hours
-                    hoursLogged: 0, // Initialize hours logged
+                    
+                    // === UPDATED THESE FIELDS ===
+                    assignedDesignerHours: designerHoursMap, // Store the map
+                    totalAllocatedHours: totalAllocatedHours, // Store the calculated total
+                    hoursLogged: 0, // Reset or initialize hours logged when re-assigning
+                    // ============================
+                    
                     status: 'in_progress',
                     designStatus: 'in_progress'
                 };
                 
-                activityDetail = `Designers assigned: ${validatedDesigners.map(d => d.name).join(', ')} with ${allocatedHours} hours allocated`;
+                activityDetail = `Designers assigned: ${validatedDesigners.map(d => d.name).join(', ')} with a total of ${totalAllocatedHours} hours.`;
                 
                 // Notify each designer
                 for (const designer of validatedDesigners) {
@@ -432,12 +461,12 @@ const handler = async (req, res) => {
                         type: 'project_assigned',
                         recipientUid: designer.uid,
                         recipientRole: 'designer',
-                        message: `New project assigned: "${project.projectName}" (${allocatedHours} hours allocated)`,
+                        message: `New project assigned: "${project.projectName}" (${designerHoursMap[designer.uid] || 0} hours allocated)`,
                         projectId: id,
                         projectName: project.projectName,
                         clientCompany: project.clientCompany,
                         assignedBy: req.user.name,
-                        allocatedHours: allocatedHours,
+                        allocatedHours: designerHoursMap[designer.uid] || 0,
                         priority: 'high'
                     });
                 }
@@ -546,6 +575,262 @@ const handler = async (req, res) => {
             success: false, 
             error: 'Internal Server Error', 
             message: error.message 
+        });
+    }
+};
+
+module.exports = allowCors(handler);
+2. New File: api/variations.js
+You must create this new file in your api/ folder. This will fix the POST /api/variations 404 error.
+
+JavaScript
+
+// api/variations.js - Handles creation of new variations
+const admin = require('./_firebase-admin');
+const { verifyToken } = require('../middleware/auth');
+const util = require('util');
+
+const db = admin.firestore();
+
+const allowCors = fn => async (req, res) => {
+    res.setHeader('Access-Control-Allow-Credentials', true);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST,PUT,DELETE');
+    res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization');
+    if (req.method === 'OPTIONS') {
+        res.status(200).end();
+        return;
+    }
+    return await fn(req, res);
+};
+
+// Helper function to remove undefined values from objects before Firestore
+function sanitizeForFirestore(obj) {
+    const sanitized = {};
+    for (const [key, value] of Object.entries(obj)) {
+        if (value !== undefined) {
+            sanitized[key] = value;
+        }
+    }
+    return sanitized;
+}
+
+const handler = async (req, res) => {
+    try {
+        await util.promisify(verifyToken)(req, res);
+
+        // Parse JSON body for POST/PUT
+        if ((req.method === 'POST' || req.method === 'PUT') && req.headers['content-type'] === 'application/json') {
+            if (!req.body || Object.keys(req.body).length === 0) {
+                await new Promise((resolve) => {
+                    const chunks = [];
+                    req.on('data', (chunk) => chunks.push(chunk));
+                    req.on('end', () => {
+                        try {
+                            const bodyBuffer = Buffer.concat(chunks);
+                            req.body = bodyBuffer.length > 0 ? JSON.parse(bodyBuffer.toString()) : {};
+                        } catch (e) {
+                            console.error("Error parsing JSON body:", e);
+                            req.body = {};
+                        }
+                        resolve();
+                    });
+                });
+            }
+        }
+
+        // ============================================
+        // POST - Create a new variation for approval
+        // ============================================
+        if (req.method === 'POST') {
+            // Only Design Leads can create variations
+            if (req.user.role !== 'design_lead') {
+                return res.status(403).json({ success: false, error: 'Only Design Leads can submit variations.' });
+            }
+
+            const {
+                parentProjectId,
+                variationCode,
+                estimatedHours,
+                scopeDescription
+            } = req.body;
+
+            // --- Validation ---
+            if (!parentProjectId || !variationCode || !estimatedHours || !scopeDescription) {
+                return res.status(400).json({ success: false, error: 'Missing required fields.' });
+            }
+
+            // Get parent project for context
+            const projectDoc = await db.collection('projects').doc(parentProjectId).get();
+            if (!projectDoc.exists) {
+                return res.status(404).json({ success: false, error: 'Parent project not found.' });
+            }
+            const project = projectDoc.data();
+
+            // Check for duplicate variation code
+            const existingVariation = await db.collection('variations')
+                .where('parentProjectId', '==', parentProjectId)
+                .where('variationCode', '==', variationCode)
+                .get();
+
+            if (!existingVariation.empty) {
+                return res.status(400).json({ success: false, error: 'This Variation Code already exists for this project.' });
+            }
+
+            // --- Create Variation Document ---
+            const variationData = {
+                parentProjectId: parentProjectId,
+                parentProjectName: project.projectName,
+                parentProjectCode: project.projectCode,
+                clientCompany: project.clientCompany,
+                
+                variationCode: variationCode,
+                estimatedHours: parseFloat(estimatedHours),
+                scopeDescription: scopeDescription,
+                
+                status: 'pending_coo_approval',
+                
+                createdByUid: req.user.uid,
+                createdByName: req.user.name,
+                createdByRole: req.user.role,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            };
+
+            const variationRef = await db.collection('variations').add(sanitizeForFirestore(variationData));
+
+            // --- Log Activity ---
+            await db.collection('activities').add({
+                type: 'variation_created',
+                details: `Variation "${variationCode}" (${estimatedHours}h) submitted for approval by ${req.user.name}`,
+                performedByName: req.user.name,
+                performedByRole: req.user.role,
+                performedByUid: req.user.uid,
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                projectId: parentProjectId,
+                variationId: variationRef.id
+            });
+
+            // --- Notify all COOs ---
+            const cooSnapshot = await db.collection('users').where('role', '==', 'coo').get();
+            const notifications = [];
+            
+            cooSnapshot.forEach(doc => {
+                notifications.push(db.collection('notifications').add({
+                    type: 'variation_pending_approval',
+                    recipientUid: doc.id,
+                    recipientRole: 'coo',
+                    message: `New variation "${variationCode}" for ${project.projectName} requires approval.`,
+                    projectId: parentProjectId,
+                    variationId: variationRef.id,
+                    estimatedHours: parseFloat(estimatedHours),
+                    submittedBy: req.user.name,
+                    priority: 'high',
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    isRead: false
+                }));
+            });
+            
+            await Promise.all(notifications);
+
+            return res.status(200).json({ success: true, message: 'Variation submitted for approval.', variationId: variationRef.id });
+        }
+
+        return res.status(405).json({ success: false, error: 'Method not allowed' });
+
+    } catch (error) {
+        console.error('Variations API error:', error);
+        return res.status(500).json({
+            success: false,
+            error: 'Internal Server Error',
+            message: error.message
+        });
+    }
+};
+
+module.exports = allowCors(handler);
+3. New File: api/projects/generate-variation-code.js
+You must create this new file inside a new folder named projects within your api/ folder. The path should be api/projects/generate-variation-code.js. This will fix the GET /api/projects/generate-variation-code 404 error.
+
+JavaScript
+
+// api/projects/generate-variation-code.js - Generates the next variation code
+const admin = require('../_firebase-admin'); // Note: '../' to go up one directory
+const { verifyToken } = require('../../middleware/auth'); // Note: '../../'
+const util = require('util');
+
+const db = admin.firestore();
+
+const allowCors = fn => async (req, res) => {
+    res.setHeader('Access-Control-Allow-Credentials', true);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization');
+    if (req.method === 'OPTIONS') {
+        res.status(200).end();
+        return;
+    }
+    return await fn(req, res);
+};
+
+const handler = async (req, res) => {
+    try {
+        await util.promisify(verifyToken)(req, res);
+
+        // ============================================
+        // GET - Generate a new variation code
+        // ============================================
+        if (req.method === 'GET') {
+            const { parentId } = req.query;
+
+            if (!parentId) {
+                return res.status(400).json({ success: false, error: 'Parent Project ID (parentId) is required.' });
+            }
+
+            // 1. Get parent project
+            const projectDoc = await db.collection('projects').doc(parentId).get();
+            if (!projectDoc.exists) {
+                return res.status(404).json({ success: false, error: 'Parent project not found.' });
+            }
+            const project = projectDoc.data();
+            const baseProjectCode = project.projectCode;
+
+            // 2. Query all existing variations for this parent
+            const variationsSnapshot = await db.collection('variations')
+                .where('parentProjectId', '==', parentId)
+                .get();
+
+            let maxNum = 0;
+            const variationRegex = /-V(\d+)$/; // Regex to find "-V" followed by digits at the end
+
+            variationsSnapshot.forEach(doc => {
+                const data = doc.data();
+                if (data.variationCode) {
+                    const match = data.variationCode.match(variationRegex);
+                    if (match && match[1]) {
+                        const num = parseInt(match[1], 10);
+                        if (num > maxNum) {
+                            maxNum = num;
+                        }
+                    }
+                }
+            });
+
+            // 3. The new variation number is the max found + 1
+            const newVariationNum = maxNum + 1;
+            const newVariationCode = `${baseProjectCode}-V${newVariationNum}`;
+
+            return res.status(200).json({ success: true, data: { variationCode: newVariationCode } });
+        }
+
+        return res.status(405).json({ success: false, error: 'Method not allowed' });
+
+    } catch (error) {
+        console.error('Generate Variation Code API error:', error);
+        return res.status(500).json({
+            success: false,
+            error: 'Internal Server Error',
+            message: error.message
         });
     }
 };

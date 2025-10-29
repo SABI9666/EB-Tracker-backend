@@ -1,4 +1,4 @@
-// api/variations.js - Handles creation of new variations
+// api/variations.js - Handles creation, fetching, and approval of variations
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
@@ -50,6 +50,48 @@ const handler = async (req, res) => {
                     });
                 });
             }
+        }
+
+        // ============================================
+        // GET - Fetch variations
+        // ============================================
+        if (req.method === 'GET') {
+            const { id, status, parentProjectId } = req.query;
+
+            // --- Get a single variation by ID ---
+            if (id) {
+                if (req.user.role !== 'coo' && req.user.role !== 'director') {
+                    return res.status(403).json({ success: false, error: 'Permission denied.' });
+                }
+                const doc = await db.collection('variations').doc(id).get();
+                if (!doc.exists) {
+                    return res.status(404).json({ success: false, error: 'Variation not found.' });
+                }
+                return res.status(200).json({ success: true, data: { id: doc.id, ...doc.data() } });
+            }
+
+            // --- Get variations based on filters (e.g., for COO dashboard) ---
+            let query = db.collection('variations');
+
+            if (req.user.role === 'coo' || req.user.role === 'director') {
+                if (status) {
+                    query = query.where('status', '==', status);
+                }
+            } else if (req.user.role === 'design_lead') {
+                // Design leads can see variations they created
+                query = query.where('createdByUid', '==', req.user.uid);
+            } else {
+                return res.status(403).json({ success: false, error: 'You do not have permission to view variations.' });
+            }
+
+            if (parentProjectId) {
+                query = query.where('parentProjectId', '==', parentProjectId);
+            }
+
+            const snapshot = await query.orderBy('createdAt', 'desc').get();
+            const variations = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            
+            return res.status(200).json({ success: true, data: variations });
         }
 
         // ============================================
@@ -148,6 +190,100 @@ const handler = async (req, res) => {
 
             return res.status(200).json({ success: true, message: 'Variation submitted for approval.', variationId: variationRef.id });
         }
+
+        // ============================================
+        // PUT - Approve or Reject a variation
+        // ============================================
+        if (req.method === 'PUT') {
+            const { id } = req.query;
+            const { action, data } = req.body;
+
+            if (!id) {
+                return res.status(400).json({ success: false, error: 'Variation ID is required.' });
+            }
+
+            if (req.user.role !== 'coo' && req.user.role !== 'director') {
+                return res.status(403).json({ success: false, error: 'Only COO or Director can approve variations.' });
+            }
+            
+            if (action === 'review_variation') {
+                const { status, notes, parentProjectId, approvedHours } = data;
+
+                if (!status || (status !== 'approved' && status !== 'rejected')) {
+                    return res.status(400).json({ success: false, error: 'Invalid status. Must be "approved" or "rejected".' });
+                }
+                
+                if (status === 'rejected' && !notes) {
+                    return res.status(400).json({ success: false, error: 'Rejection notes are required.' });
+                }
+
+                const variationRef = db.collection('variations').doc(id);
+                const variationDoc = await variationRef.get();
+                if (!variationDoc.exists) {
+                    return res.status(404).json({ success: false, error: 'Variation not found.' });
+                }
+                const variation = variationDoc.data();
+
+                // --- Start a transaction ---
+                await db.runTransaction(async (transaction) => {
+                    // 1. Update the variation
+                    const variationUpdates = {
+                        status: status,
+                        approvalNotes: notes || '',
+                        approvedByUid: req.user.uid,
+                        approvedByName: req.user.name,
+                        approvedAt: admin.firestore.FieldValue.serverTimestamp(),
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                    };
+                    transaction.update(variationRef, variationUpdates);
+
+                    // 2. If approved, update the parent project's budget
+                    if (status === 'approved') {
+                        if (!parentProjectId || !approvedHours) {
+                            throw new Error('Parent Project ID and Approved Hours are required for approval.');
+                        }
+                        const projectRef = db.collection('projects').doc(parentProjectId);
+                        
+                        // Use FieldValue.increment to safely add hours
+                        transaction.update(projectRef, {
+                            additionalHours: admin.firestore.FieldValue.increment(parseFloat(approvedHours)),
+                            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                        });
+                    }
+                });
+                
+                // --- Log Activity ---
+                await db.collection('activities').add({
+                    type: `variation_${status}`,
+                    details: `Variation "${variation.variationCode}" was ${status} by ${req.user.name}.`,
+                    performedByName: req.user.name,
+                    performedByRole: req.user.role,
+                    performedByUid: req.user.uid,
+                    timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                    projectId: variation.parentProjectId,
+                    variationId: id
+                });
+
+                // --- Notify Design Manager of the decision ---
+                await db.collection('notifications').add({
+                    type: `variation_${status}`,
+                    recipientUid: variation.createdByUid, // The user who created it
+                    recipientRole: 'design_lead',
+                    message: `Your variation "${variation.variationCode}" for ${variation.parentProjectName} was ${status}.`,
+                    notes: notes || 'No notes provided.',
+                    projectId: variation.parentProjectId,
+                    variationId: id,
+                    priority: 'normal',
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    isRead: false
+                });
+
+                return res.status(200).json({ success: true, message: `Variation ${status} successfully.` });
+            }
+
+            return res.status(400).json({ success: false, error: 'Invalid PUT action.' });
+        }
+
 
         return res.status(405).json({ success: false, error: 'Method not allowed' });
 

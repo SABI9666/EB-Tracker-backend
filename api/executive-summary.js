@@ -1,8 +1,8 @@
-// api/monitoring/executive-summary.js
+// api/executive-summary.js
 // This is the NEW file to power the Executive Timesheet Monitoring dashboard.
 
-const admin = require('../_firebase-admin'); // Adjust path if needed
-const { verifyToken } = require('../../middleware/auth'); // Adjust path if needed
+const admin = require('./_firebase-admin'); // <-- FIXED PATH
+const { verifyToken } = require('../middleware/auth'); // <-- FIXED PATH
 const util = require('util');
 
 const db = admin.firestore();
@@ -10,7 +10,7 @@ const db = admin.firestore();
 // Standard CORS helper function
 const allowCors = fn => async (req, res) => {
     res.setHeader('Access-Control-Allow-Credentials', true);
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Origin', '*'); // Adjust this for production if needed
     res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With, Accept, Content-Type, Authorization');
     if (req.method === 'OPTIONS') {
@@ -25,7 +25,7 @@ const handler = async (req, res) => {
         // 1. Authenticate the user
         await util.promisify(verifyToken)(req, res);
 
-        // 2. Authorize: Only allow executive roles to see this data
+        // 2. Authorize: Only allow executive roles
         const allowedRoles = ['coo', 'director', 'design_lead'];
         if (!req.user || !allowedRoles.includes(req.user.role)) {
             return res.status(403).json({ 
@@ -46,23 +46,19 @@ const handler = async (req, res) => {
                 });
             }
 
-            // Convert date strings to Firestore Timestamps for querying
             const fromTimestamp = admin.firestore.Timestamp.fromDate(new Date(fromDate));
-            // Add 1 day to 'toDate' to include the entire day
             const toDateObj = new Date(toDate);
-            toDateObj.setDate(toDateObj.getDate() + 1);
+            toDateObj.setDate(toDateObj.getDate() + 1); // Go to end of the day
             const toTimestamp = admin.firestore.Timestamp.fromDate(toDateObj);
 
-            // 5. Query Firestore
-            // We query projects that have had timesheet updates within the date range.
+            // 5. Query Firestore for projects
+            // We fetch all projects that have allocated hours.
             const projectsRef = db.collection('projects');
             const snapshot = await projectsRef
-                .where('lastTimesheetUpdate', '>=', fromTimestamp)
-                .where('lastTimesheetUpdate', '<=', toTimestamp)
+                .where('allocatedHours', '>', 0)
                 .get();
 
             if (snapshot.empty) {
-                // Return empty data if no projects were active in this period
                 return res.status(200).json({
                     success: true,
                     data: {
@@ -86,29 +82,55 @@ const handler = async (req, res) => {
                 totalHoursLogged: 0,
             };
 
+            // We also need to get timesheets within the date range
+            const timesheetSnapshot = await db.collection('timesheets')
+                .where('date', '>=', fromTimestamp)
+                .where('date', '<=', toTimestamp)
+                .get();
+
+            // Create a map of hours logged per project *within the date range*
+            const hoursLoggedByProject = {};
+            timesheetSnapshot.docs.forEach(doc => {
+                const entry = doc.data();
+                const projectId = entry.projectId;
+                if (!hoursLoggedByProject[projectId]) {
+                    hoursLoggedByProject[projectId] = 0;
+                }
+                hoursLoggedByProject[projectId] += (entry.hours || 0);
+            });
+
+            // Now loop through projects to categorize them
             snapshot.docs.forEach(doc => {
                 const project = doc.data();
-                
-                const allocated = project.allocatedHours || 0;
-                const logged = project.hoursLogged || 0;
+                const projectId = doc.id;
 
-                summary.totalProjects++;
-                summary.totalHoursAllocated += allocated;
-                summary.totalHoursLogged += logged;
+                // Only count projects that had hours logged in this period
+                if (hoursLoggedByProject[projectId] > 0) {
+                    const allocated = project.allocatedHours || 0;
+                    // Use the project's *total* hours logged for budget calculation
+                    const totalLoggedOnProject = project.hoursLogged || 0; 
 
-                // Categorize projects based on budget usage
-                if (allocated > 0) {
-                    const budgetUsed = (logged / allocated) * 100;
-                    
-                    if (budgetUsed <= 70) {
-                        summary.onTrackProjects++;
-                    } else if (budgetUsed > 70 && budgetUsed <= 100) {
-                        summary.atRiskProjects++;
-                    } else if (budgetUsed > 100) {
-                        summary.exceededProjects++;
+                    summary.totalProjects++;
+                    summary.totalHoursAllocated += allocated;
+                    summary.totalHoursLogged += totalLoggedOnProject; // Use total logged for this metric
+
+                    // Categorize based on *total* budget usage
+                    if (allocated > 0) {
+                        const budgetUsed = (totalLoggedOnProject / allocated) * 100;
+                        
+                        if (budgetUsed <= 70) {
+                            summary.onTrackProjects++;
+                        } else if (budgetUsed > 70 && budgetUsed <= 100) {
+                            summary.atRiskProjects++;
+                        } else if (budgetUsed > 100) {
+                            summary.exceededProjects++;
+                        }
+                    } else {
+                        // If 0 hours allocated, but hours were logged, count as 'Exceeded'
+                        if (totalLoggedOnProject > 0) {
+                            summary.exceededProjects++;
+                        }
                     }
-                } else {
-                    summary.onTrackProjects++;
                 }
             });
 

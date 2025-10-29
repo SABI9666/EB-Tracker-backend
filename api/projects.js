@@ -1,4 +1,4 @@
-// api/projects.js - Fixed with proper hour allocation logic
+// api/projects.js - CONSOLIDATED with variation code generator
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
@@ -53,12 +53,59 @@ const handler = async (req, res) => {
         }
 
         // ============================================
-        // GET - Retrieve projects with role-based filtering
+        // GET - Retrieve projects OR generate variation code
         // ============================================
         if (req.method === 'GET') {
-            const { id } = req.query;
-            
-            if (id) {
+            const { id, action, parentId } = req.query;
+
+            // ================================================
+            // NEW: Generate Variation Code Logic
+            // ================================================
+            if (action === 'generate-variation-code') {
+                if (!parentId) {
+                    return res.status(400).json({ success: false, error: 'Parent Project ID (parentId) is required.' });
+                }
+    
+                // 1. Get parent project
+                const projectDoc = await db.collection('projects').doc(parentId).get();
+                if (!projectDoc.exists) {
+                    return res.status(404).json({ success: false, error: 'Parent project not found.' });
+                }
+                const project = projectDoc.data();
+                const baseProjectCode = project.projectCode;
+    
+                // 2. Query all existing variations for this parent
+                const variationsSnapshot = await db.collection('variations')
+                    .where('parentProjectId', '==', parentId)
+                    .get();
+    
+                let maxNum = 0;
+                const variationRegex = /-V(\d+)$/; // Regex to find "-V" followed by digits at the end
+    
+                variationsSnapshot.forEach(doc => {
+                    const data = doc.data();
+                    if (data.variationCode) {
+                        const match = data.variationCode.match(variationRegex);
+                        if (match && match[1]) {
+                            const num = parseInt(match[1], 10);
+                            if (num > maxNum) {
+                                maxNum = num;
+                            }
+                        }
+                    }
+                });
+    
+                // 3. The new variation number is the max found + 1
+                const newVariationNum = maxNum + 1;
+                const newVariationCode = `${baseProjectCode}-V${newVariationNum}`;
+    
+                return res.status(200).json({ success: true, data: { variationCode: newVariationCode } });
+            }
+
+            // ================================================
+            // Get Single Project by ID
+            // ================================================
+            else if (id) {
                 const doc = await db.collection('projects').doc(id).get();
                 if (!doc.exists) {
                     return res.status(404).json({ success: false, error: 'Project not found' });
@@ -105,31 +152,35 @@ const handler = async (req, res) => {
                 return res.status(200).json({ success: true, data: projectData });
             }
             
-            // Get projects based on role
-            let query = db.collection('projects').orderBy('createdAt', 'desc');
-            
-            // Design Leads ONLY see projects allocated to them by COO
-            if (req.user.role === 'design_lead') {
-                query = query.where('designLeadUid', '==', req.user.uid)
-                            .where('status', 'in', ['assigned', 'in_progress', 'completed']);
+            // ================================================
+            // Get All Projects (with role-based filtering)
+            // ================================================
+            else {
+                let query = db.collection('projects').orderBy('createdAt', 'desc');
+                
+                // Design Leads ONLY see projects allocated to them by COO
+                if (req.user.role === 'design_lead') {
+                    query = query.where('designLeadUid', '==', req.user.uid)
+                                .where('status', 'in', ['assigned', 'in_progress', 'completed']);
+                }
+                
+                // Designer: Only projects where they are assigned by Design Lead
+                else if (req.user.role === 'designer') {
+                    query = query.where('assignedDesigners', 'array-contains', req.user.uid);
+                }
+                
+                // BDM: Only their own projects
+                else if (req.user.role === 'bdm') {
+                    query = query.where('bdmUid', '==', req.user.uid);
+                }
+                
+                // COO, Director, Accounts: See all projects (no filter needed)
+                
+                const snapshot = await query.get();
+                const projects = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                
+                return res.status(200).json({ success: true, data: projects });
             }
-            
-            // Designer: Only projects where they are assigned by Design Lead
-            else if (req.user.role === 'designer') {
-                query = query.where('assignedDesigners', 'array-contains', req.user.uid);
-            }
-            
-            // BDM: Only their own projects
-            else if (req.user.role === 'bdm') {
-                query = query.where('bdmUid', '==', req.user.uid);
-            }
-            
-            // COO, Director, Accounts: See all projects (no filter needed)
-            
-            const snapshot = await query.get();
-            const projects = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            
-            return res.status(200).json({ success: true, data: projects });
         }
 
         // ============================================
@@ -274,7 +325,6 @@ const handler = async (req, res) => {
             let activityDetail = '';
             let notifications = [];
             
-            // FIXED: Changed from 'allocate_design_lead' to 'allocate_to_design_lead' to match frontend
             if (action === 'allocate_to_design_lead' || action === 'allocate_design_lead') {
                 // Only COO or Director can allocate
                 if (!['coo', 'director'].includes(req.user.role)) {
@@ -318,7 +368,6 @@ const handler = async (req, res) => {
                     });
                 }
                 
-                // ================== FIX 1: Save Hours from COO ==================
                 const maxAllocatedHours = parseFloat(data.maxAllocatedHours || 0);
                 if (maxAllocatedHours <= 0) {
                      return res.status(400).json({ 
@@ -342,11 +391,8 @@ const handler = async (req, res) => {
                     priority: data.priority || 'Normal',
                     status: 'assigned',
                     designStatus: 'allocated',
-                    
-                    // === ADDED THESE FIELDS ===
                     maxAllocatedHours: maxAllocatedHours,
                     additionalHours: parseFloat(data.additionalHours || 0)
-                    // ==========================
                 };
                 
                 activityDetail = `Project allocated to Design Lead: ${designLeadData.name} by ${req.user.name} with ${maxAllocatedHours} hours.`;
@@ -395,11 +441,9 @@ const handler = async (req, res) => {
                     });
                 }
                 
-                // ================== FIX 2: Get correct hour data ==================
                 const designerUids = data.designerUids || [];
                 const designerHoursMap = data.designerHours || {}; // e.g., { "uid1": 8, "uid2": 10 }
                 const totalAllocatedHours = data.totalAllocatedHours || 0; // Total
-                // ===================================================================
                 
                 const validatedDesigners = [];
                 
@@ -442,13 +486,9 @@ const handler = async (req, res) => {
                     assignmentDate: admin.firestore.FieldValue.serverTimestamp(),
                     assignedBy: req.user.name,
                     assignedByUid: req.user.uid,
-                    
-                    // === UPDATED THESE FIELDS ===
                     assignedDesignerHours: designerHoursMap, // Store the map
                     totalAllocatedHours: totalAllocatedHours, // Store the calculated total
                     hoursLogged: 0, // Reset or initialize hours logged when re-assigning
-                    // ============================
-                    
                     status: 'in_progress',
                     designStatus: 'in_progress'
                 };

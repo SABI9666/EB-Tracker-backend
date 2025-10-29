@@ -1,7 +1,8 @@
-// This is a NEW file to power the Executive Timesheet Monitoring dashboard.
+// api/monitoring/executive-summary.js
+// This is the NEW file to power the Executive Timesheet Monitoring dashboard.
 
 const admin = require('../_firebase-admin'); // Adjust path if needed
-const { verifyToken } = require('../middleware/auth'); // Adjust path if needed
+const { verifyToken } = require('../../middleware/auth'); // Adjust path if needed
 const util = require('util');
 
 const db = admin.firestore();
@@ -54,7 +55,6 @@ const handler = async (req, res) => {
 
             // 5. Query Firestore
             // We query projects that have had timesheet updates within the date range.
-            // This is efficient because 'timesheets.js' updates 'lastTimesheetUpdate' on the project.
             const projectsRef = db.collection('projects');
             const snapshot = await projectsRef
                 .where('lastTimesheetUpdate', '>=', fromTimestamp)
@@ -89,8 +89,6 @@ const handler = async (req, res) => {
             snapshot.docs.forEach(doc => {
                 const project = doc.data();
                 
-                // Get hours from the project document. 
-                // These are updated by your 'timesheets.js' API.
                 const allocated = project.allocatedHours || 0;
                 const logged = project.hoursLogged || 0;
 
@@ -98,7 +96,7 @@ const handler = async (req, res) => {
                 summary.totalHoursAllocated += allocated;
                 summary.totalHoursLogged += logged;
 
-                // Categorize projects based on budget usage (matches your screenshot)
+                // Categorize projects based on budget usage
                 if (allocated > 0) {
                     const budgetUsed = (logged / allocated) * 100;
                     
@@ -110,7 +108,6 @@ const handler = async (req, res) => {
                         summary.exceededProjects++;
                     }
                 } else {
-                    // If 0 hours allocated, count as 'On-Track'
                     summary.onTrackProjects++;
                 }
             });

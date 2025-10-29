@@ -123,8 +123,7 @@ app.get('/', (req, res) => {
             'GET  /api/timesheets - List timesheets',
             'POST /api/timesheets - Log hours',
             'PUT  /api/timesheets - Update timesheet',
-            'DELETE /api/timesheets - Delete timesheet',
-            'GET  /api/executive-summary - Executive summary data' // <-- LINE ADDED
+            'DELETE /api/timesheets - Delete timesheet'
         ]
     });
 });
@@ -148,7 +147,6 @@ try {
     const deliverablesHandler = require('./api/deliverables');
     const usersHandler = require('./api/users');
     const timesheetsHandler = require('./api/timesheets');  // NEW - Timesheet API
-    const executiveSummaryHandler = require('./api/executive-summary'); // <-- LINE ADDED
 
     console.log('✅ All handlers loaded successfully');
 
@@ -165,7 +163,6 @@ try {
     app.all('/api/deliverables', deliverablesHandler);
     app.all('/api/users', usersHandler);
     app.all('/api/timesheets', timesheetsHandler);  // NEW - Timesheet routes
-    app.all('/api/executive-summary', executiveSummaryHandler); // <-- LINE ADDED
 
     console.log('✅ All routes registered');
 
@@ -217,7 +214,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('   GET  /api/projects');
     console.log('   GET  /api/activities');
     console.log('   GET  /api/timesheets        ⏱️  NEW');
-    console.log('   GET  /api/executive-summary   💼  NEW'); // <-- LINE ADDED
+    console.log('   POST /api/timesheets        ⏱️  NEW');
     console.log('   ... and more');
     console.log('');
 });
@@ -242,3 +239,5 @@ process.on('SIGINT', () => {
 });
 
 module.exports = app;
+
+

@@ -11,12 +11,12 @@ const db = admin.firestore();
 
 // --- 1. Event to Role Map (Who to email) ---
 const EMAIL_RECIPIENT_MAP = {
-  'project.submitted': ['Director', 'COO', 'BDM'],
-  'project.approved_by_director': ['BDM'],
-  'bom.file_provided_for_estimation': ['Estimator'],
+  'project.submitted': ['Director','director','bdm', 'COO', 'BDM'],
+  'project.approved_by_director': ['BDM','bdm'],
+  'bom.file_provided_for_estimation': ['Estimator','estimator'],
   'estimation.complete': ['COO'],
   'design.variation_request': ['COO', 'Director', 'BDM'],
-  'variation.approved_by_coo': ['Director', 'BDM', 'Design Manager'],
+  'variation.approved_by_coo': ['Director','director', 'BDM','bdm', 'Design Manager'],
   'project.allotment_': ['Design Manager'] // 'designer' is handled separately
 };
 

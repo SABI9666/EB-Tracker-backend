@@ -171,7 +171,7 @@ try {
     app.all('/api/users', usersHandler);
     app.all('/api/timesheets', timesheetsHandler);
     app.all('/api/variations', variationsHandler);
-    app.all('/api/email', emailHandler); // <-- NEW EMAIL API
+    app.use('/api/email', emailHandler); // <-- NEW EMAIL API
 
     console.log('✅ All routes registered');
 
@@ -250,3 +250,4 @@ process.on('SIGINT', () => {
 });
 
 module.exports = app;
+

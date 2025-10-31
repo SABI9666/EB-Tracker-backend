@@ -56,7 +56,7 @@ const handler = async (req, res) => {
         // GET - Retrieve projects OR generate variation code
         // ============================================
         if (req.method === 'GET') {
-            const { id, action, parentId } = req.query;
+            const { id, action, parentId, status } = req.query; // Added 'status' query param
 
             // ================================================
             // NEW: Generate Variation Code Logic
@@ -121,7 +121,7 @@ const handler = async (req, res) => {
                     });
                 }
                 
-                if (req.user.role === 'designer' && !projectData.assignedDesigners?.includes(req.user.uid)) {
+                if (req.user.role === 'designer' && !(projectData.assignedDesigners || []).includes(req.user.uid)) {
                     return res.status(403).json({ 
                         success: false, 
                         error: 'You are not assigned to this project' 
@@ -166,7 +166,11 @@ const handler = async (req, res) => {
                 
                 // Designer: Only projects where they are assigned by Design Lead
                 else if (req.user.role === 'designer') {
-                    query = query.where('assignedDesigners', 'array-contains', req.user.uid);
+                    // Check for the specific query param from showTasks()
+                    if (req.query.assignedToMe === 'true') {
+                         query = query.where('assignedDesigners', 'array-contains', req.user.uid);
+                    }
+                    // Otherwise, a general 'designer' GET might return nothing or be forbidden
                 }
                 
                 // BDM: Only their own projects
@@ -174,7 +178,15 @@ const handler = async (req, res) => {
                     query = query.where('bdmUid', '==', req.user.uid);
                 }
                 
-                // COO, Director, Accounts: See all projects (no filter needed)
+                // Accounts: Filter by status if requested (e.g., 'completed')
+                if (req.user.role === 'accounts' && status) {
+                    query = query.where('status', '==', status);
+                }
+                
+                // COO, Director: See all projects (no filter needed, unless they filter)
+                if ((req.user.role === 'coo' || req.user.role === 'director') && status) {
+                     query = query.where('status', '==', status);
+                }
                 
                 const snapshot = await query.get();
                 const projects = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -226,11 +238,14 @@ const handler = async (req, res) => {
                 
                 // Check if project already exists
                 if (proposal.projectCreated && proposal.projectId) {
-                    return res.status(400).json({ 
-                        success: false, 
-                        error: 'Project already exists for this proposal',
-                        projectId: proposal.projectId 
-                    });
+                    const existingProjectDoc = await db.collection('projects').doc(proposal.projectId).get();
+                    if(existingProjectDoc.exists) {
+                        return res.status(200).json({ // Return 200 OK, but indicate it already exists
+                            success: true, // Not a failure, just already done
+                            message: 'Project already exists for this proposal',
+                            projectId: proposal.projectId 
+                        });
+                    }
                 }
                 
                 // Create the project
@@ -242,13 +257,13 @@ const handler = async (req, res) => {
                     clientContact: proposal.clientContact || '',
                     clientEmail: proposal.clientEmail || '',
                     clientPhone: proposal.clientPhone || '',
-                    location: proposal.location || '',
+                    location: proposal.country || '', // Use 'country' from proposal
                     bdmName: proposal.createdByName || 'Unknown',
                     bdmUid: proposal.createdByUid || '',
                     bdmEmail: proposal.createdByEmail || proposal.bdmEmail || '',
                     quoteValue: proposal.pricing?.quoteValue || 0,
                     currency: proposal.pricing?.currency || 'USD',
-                    status: 'pending', // Will be 'assigned' when allocated to design lead
+                    status: 'pending_allocation', // Changed from 'pending'
                     designStatus: 'not_started',
                     
                     // Initialize all hour fields
@@ -511,6 +526,59 @@ const handler = async (req, res) => {
                     });
                 }
             }
+
+            // *** START OF FIX ***
+            // Design Lead/Manager marking project as complete
+            else if (action === 'mark_complete') {
+                // Only allocated Design Lead, COO, or Director can complete
+                if (req.user.role === 'design_lead' && project.designLeadUid !== req.user.uid) {
+                    return res.status(403).json({ 
+                        success: false, 
+                        error: 'You are not the allocated Design Lead for this project' 
+                    });
+                }
+                
+                if (!['design_lead', 'coo', 'director'].includes(req.user.role)) {
+                    return res.status(403).json({ 
+                        success: false, 
+                        error: 'Only the Design Lead, COO, or Director can complete this project' 
+                    });
+                }
+                
+                updates = {
+                    status: 'completed',
+                    designStatus: 'completed',
+                    completedAt: admin.firestore.FieldValue.serverTimestamp(),
+                    completedBy: req.user.name,
+                    completedByUid: req.user.uid
+                };
+                
+                activityDetail = `Project marked as COMPLETED by ${req.user.name}.`;
+                
+                // Notify the Accounts team
+                notifications.push({
+                    type: 'project_completed',
+                    recipientRole: 'accounts',
+                    message: `Project "${project.projectName}" is complete and ready for invoicing.`,
+                    projectId: id,
+                    projectName: project.projectName,
+                    clientCompany: project.clientCompany,
+                    priority: 'high'
+                });
+
+                // Also notify BDM
+                if (project.bdmUid) {
+                    notifications.push({
+                        type: 'project_completed',
+                        recipientUid: project.bdmUid,
+                        recipientRole: 'bdm',
+                        message: `Your project "${project.projectName}" has been marked complete by the design team.`,
+                        projectId: id,
+                        priority: 'normal'
+                    });
+                }
+            }
+            // *** END OF FIX ***
             
             else {
                 return res.status(400).json({ 

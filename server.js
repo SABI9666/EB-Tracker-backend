@@ -1,6 +1,4 @@
-
-
-// server.js - Complete backend entry point with EMAIL + TIMESHEET + VARIATIONS API
+// server.js - Complete backend entry point with EMAIL + TIMESHEET + VARIATIONS + TIME-REQUESTS API
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -75,7 +73,7 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Request logging
 app.use((req, res, next) => {
-    console.log(`🔥 ${req.method} ${req.path}`);
+    console.log(`📥 ${req.method} ${req.path}`);
     if (req.headers.authorization) {
         console.log('🔑 Auth header present');
     }
@@ -99,7 +97,7 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
     res.json({
         message: 'EBTracker Backend API',
-        version: '1.0.0',
+        version: '1.1.0',
         status: 'running',
         endpoints: [
             'GET  /health - Health check',
@@ -124,11 +122,16 @@ app.get('/', (req, res) => {
             'GET  /api/users - List users',
             'POST /api/users - Create user',
             'GET  /api/timesheets - List timesheets',
+            'GET  /api/timesheets?action=executive_dashboard - Executive analytics',
             'POST /api/timesheets - Log hours',
             'PUT  /api/timesheets - Update timesheet',
             'DELETE /api/timesheets - Delete timesheet',
+            'GET  /api/time-requests - List time requests',
+            'POST /api/time-requests - Submit time request',
+            'PUT  /api/time-requests - Review time request',
+            'DELETE /api/time-requests - Delete time request',
             'POST /api/variations - Create a new variation',
-            'POST /api/email/trigger - Send a Resend email' // <-- NEWLY AVAILABLE
+            'POST /api/email/trigger - Send a Resend email'
         ]
     });
 });
@@ -152,8 +155,9 @@ try {
     const deliverablesHandler = require('./api/deliverables');
     const usersHandler = require('./api/users');
     const timesheetsHandler = require('./api/timesheets');
+    const timeRequestsHandler = require('./api/time-requests'); // <-- NEW TIME REQUESTS API
     const variationsHandler = require('./api/variations');
-    const emailHandler = require('./api/email'); // <-- NEW EMAIL API
+    const emailHandler = require('./api/email');
 
     console.log('✅ All handlers loaded successfully');
 
@@ -170,8 +174,9 @@ try {
     app.all('/api/deliverables', deliverablesHandler);
     app.all('/api/users', usersHandler);
     app.all('/api/timesheets', timesheetsHandler);
+    app.all('/api/time-requests', timeRequestsHandler); // <-- NEW TIME REQUESTS API
     app.all('/api/variations', variationsHandler);
-    app.use('/api/email', emailHandler); // <-- NEW EMAIL API
+    app.use('/api/email', emailHandler);
 
     console.log('✅ All routes registered');
 
@@ -222,11 +227,21 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('   GET  /api/proposals');
     console.log('   GET  /api/projects');
     console.log('   GET  /api/activities');
-    console.log('   GET  /api/timesheets         ⏱️  NEW');
-    console.log('   POST /api/timesheets         ⏱️  NEW');
-    console.log('   POST /api/variations         ✨  NEW');
-    console.log('   POST /api/email/trigger      📧  NEW');
+    console.log('   GET  /api/timesheets');
+    console.log('   GET  /api/timesheets?action=executive_dashboard  📊 NEW');
+    console.log('   POST /api/timesheets');
+    console.log('   GET  /api/time-requests                          ⏰ NEW');
+    console.log('   POST /api/time-requests                          ⏰ NEW');
+    console.log('   PUT  /api/time-requests                          ⏰ NEW');
+    console.log('   POST /api/variations                             ✨ NEW');
+    console.log('   POST /api/email/trigger                          📧 NEW');
     console.log('   ... and more');
+    console.log('');
+    console.log('🎯 New Features:');
+    console.log('   📊 Executive Timesheet Dashboard');
+    console.log('   ⏰ Additional Time Request System');
+    console.log('   ✨ Variation Management');
+    console.log('   📧 Email Notifications');
     console.log('');
 });
 
@@ -250,4 +265,3 @@ process.on('SIGINT', () => {
 });
 
 module.exports = app;
-

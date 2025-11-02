@@ -1,8 +1,7 @@
-// / api/proposals.js - MODIFIED VERSION with PDF uploads and tonnage support
+// / api/proposals.js - FIXED VERSION with proper design_lead filtering
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
-const busboy = require('busboy');
 
 const db = admin.firestore();
 const bucket = admin.storage().bucket();
@@ -18,27 +17,6 @@ const allowCors = fn => async (req, res) => {
     }
     return await fn(req, res);
 };
-
-// NEW: Validation for PDF files
-function validatePDFFiles(files) {
-    const MAX_FILES = 10; // Set maximum number of files allowed
-    const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB per file
-    
-    if (files.length > MAX_FILES) {
-        throw new Error(`Maximum ${MAX_FILES} files allowed`);
-    }
-    
-    for (const file of files) {
-        if (!file.mimeType || !file.mimeType.includes('pdf')) {
-            throw new Error(`Only PDF files are allowed. Found: ${file.mimeType}`);
-        }
-        if (file.size > MAX_FILE_SIZE) {
-            throw new Error(`File ${file.filename} exceeds maximum size of 50MB`);
-        }
-    }
-    
-    return true;
-}
 
 const handler = async (req, res) => {
     try {
@@ -216,7 +194,7 @@ const handler = async (req, res) => {
         // ============================================
         // POST - Create new proposal
         // ============================================
-        if (req.method === 'POST' && !req.query.action) {
+        if (req.method === 'POST') {
             const { 
                 projectName, 
                 clientCompany, 
@@ -225,8 +203,7 @@ const handler = async (req, res) => {
                 priority, 
                 country, 
                 timeline, 
-                projectLinks,
-                filesComment
+                projectLinks 
             } = req.body;
             
             if (!projectName || !clientCompany || !scopeOfWork) {
@@ -254,12 +231,7 @@ const handler = async (req, res) => {
                     action: 'created',
                     performedByName: req.user.name,
                     details: 'Proposal created'
-                }],
-                // NEW: Add fields for PDF management
-                pdfFiles: [],
-                filesComment: filesComment || '',
-                totalFileSize: 0,
-                fileCount: 0
+                }]
             };
 
             const docRef = await db.collection('proposals').add(newProposal);
@@ -281,191 +253,6 @@ const handler = async (req, res) => {
                 success: true, 
                 data: { id: docRef.id, ...newProposal },
                 message: 'Proposal created successfully'
-            });
-        }
-
-        // ============================================
-        // POST - Upload PDF files for proposal
-        // ============================================
-        if (req.method === 'POST' && req.query.action === 'upload_pdfs') {
-            const { proposalId } = req.query;
-            
-            if (!proposalId) {
-                return res.status(400).json({ 
-                    success: false, 
-                    error: 'Proposal ID is required' 
-                });
-            }
-
-            const proposalRef = db.collection('proposals').doc(proposalId);
-            const proposalDoc = await proposalRef.get();
-            
-            if (!proposalDoc.exists) {
-                return res.status(404).json({ 
-                    success: false, 
-                    error: 'Proposal not found' 
-                });
-            }
-
-            const proposalData = proposalDoc.data();
-            
-            // Security: Only creator can upload files
-            if (proposalData.createdByUid !== req.user.uid) {
-                return res.status(403).json({ 
-                    success: false, 
-                    error: 'You can only upload files to your own proposals' 
-                });
-            }
-
-            // Parse multipart form data (files)
-            const bb = busboy({ headers: req.headers });
-            
-            const files = [];
-            const fields = {};
-            
-            return new Promise((resolve, reject) => {
-                bb.on('file', (fieldname, file, info) => {
-                    const { filename, encoding, mimeType } = info;
-                    
-                    // Validate PDF
-                    if (!mimeType.includes('pdf')) {
-                        file.resume();
-                        return reject(new Error('Only PDF files are allowed'));
-                    }
-                    
-                    const chunks = [];
-                    file.on('data', (chunk) => chunks.push(chunk));
-                    file.on('end', () => {
-                        const buffer = Buffer.concat(chunks);
-                        files.push({
-                            filename,
-                            mimeType,
-                            buffer,
-                            size: buffer.length
-                        });
-                    });
-                });
-                
-                bb.on('field', (fieldname, value) => {
-                    fields[fieldname] = value;
-                });
-                
-                bb.on('finish', async () => {
-                    try {
-                        // Validate file count
-                        const MAX_FILES = 10;
-                        const existingFileCount = proposalData.fileCount || 0;
-                        
-                        if (existingFileCount + files.length > MAX_FILES) {
-                            return res.status(400).json({
-                                success: false,
-                                error: `Maximum ${MAX_FILES} files allowed. You already have ${existingFileCount} files.`
-                            });
-                        }
-                        
-                        // Validate file sizes
-                        const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
-                        for (const file of files) {
-                            if (file.size > MAX_FILE_SIZE) {
-                                return res.status(400).json({
-                                    success: false,
-                                    error: `File ${file.filename} exceeds 50MB limit`
-                                });
-                            }
-                        }
-                        
-                        // Upload files to Firebase Storage
-                        const uploadedFiles = [];
-                        let totalSize = proposalData.totalFileSize || 0;
-                        
-                        for (const file of files) {
-                            const timestamp = Date.now();
-                            const safeName = file.filename.replace(/[^a-zA-Z0-9.-]/g, '_');
-                            const storagePath = `proposals/${proposalId}/${timestamp}_${safeName}`;
-                            
-                            const fileRef = bucket.file(storagePath);
-                            await fileRef.save(file.buffer, {
-                                metadata: {
-                                    contentType: file.mimeType,
-                                    metadata: {
-                                        proposalId: proposalId,
-                                        uploadedBy: req.user.name,
-                                        uploadedByUid: req.user.uid
-                                    }
-                                }
-                            });
-                            
-                            // Get signed URL (valid for 7 days)
-                            const [url] = await fileRef.getSignedUrl({
-                                action: 'read',
-                                expires: Date.now() + 7 * 24 * 60 * 60 * 1000
-                            });
-                            
-                            uploadedFiles.push({
-                                fileName: file.filename,
-                                storagePath: storagePath,
-                                fileUrl: url,
-                                fileSize: file.size,
-                                mimeType: file.mimeType,
-                                uploadedAt: admin.firestore.FieldValue.serverTimestamp(),
-                                uploadedBy: req.user.name,
-                                uploadedByUid: req.user.uid
-                            });
-                            
-                            totalSize += file.size;
-                        }
-                        
-                        // Update proposal with file metadata
-                        await proposalRef.update({
-                            pdfFiles: admin.firestore.FieldValue.arrayUnion(...uploadedFiles),
-                            filesComment: fields.filesComment || proposalData.filesComment || '',
-                            fileCount: existingFileCount + files.length,
-                            totalFileSize: totalSize,
-                            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-                            changeLog: admin.firestore.FieldValue.arrayUnion({
-                                timestamp: new Date().toISOString(),
-                                action: 'files_uploaded',
-                                performedByName: req.user.name,
-                                details: `Uploaded ${files.length} PDF file(s)`
-                            })
-                        });
-                        
-                        // Log activity
-                        await db.collection('activities').add({
-                            type: 'proposal_files_uploaded',
-                            details: `${files.length} PDF file(s) uploaded to proposal "${proposalData.projectName}"`,
-                            performedByName: req.user.name,
-                            performedByRole: req.user.role,
-                            performedByUid: req.user.uid,
-                            timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                            proposalId: proposalId,
-                            projectName: proposalData.projectName,
-                            fileCount: files.length
-                        });
-                        
-                        return res.status(200).json({
-                            success: true,
-                            message: `${files.length} file(s) uploaded successfully`,
-                            uploadedFiles: uploadedFiles.map(f => ({
-                                fileName: f.fileName,
-                                fileSize: f.fileSize
-                            }))
-                        });
-                        
-                    } catch (error) {
-                        console.error('Error uploading files:', error);
-                        return res.status(500).json({
-                            success: false,
-                            error: 'Error uploading files: ' + error.message
-                        });
-                    }
-                });
-                
-                bb.on('error', (error) => {
-                    reject(error);
-                });
-                
-                req.pipe(bb);
             });
         }
 
@@ -507,23 +294,6 @@ const handler = async (req, res) => {
             let activityDetail = '';
 
             switch (action) {
-                // NEW: Update files comment
-                case 'update_files_comment':
-                    if (proposal.createdByUid !== req.user.uid && !['coo', 'director'].includes(req.user.role)) {
-                        return res.status(403).json({ 
-                            success: false, 
-                            error: 'Unauthorized to update this proposal' 
-                        });
-                    }
-
-                    updates = {
-                        filesComment: data.filesComment || '',
-                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-                    };
-                    
-                    activityDetail = 'Files comment updated';
-                    break;
-
                 case 'add_links':
                     updates = { 
                         projectLinks: data.links || [],
@@ -532,86 +302,34 @@ const handler = async (req, res) => {
                     activityDetail = `Project links added`;
                     break;
                     
-                // MODIFIED: Enhanced estimation with tonnage support
                 case 'add_estimation':
-                    if (!['estimator', 'coo', 'director'].includes(req.user.role)) {
+                    if (!['estimator', 'coo'].includes(req.user.role)) {
                         return res.status(403).json({ 
                             success: false, 
-                            error: 'Only Estimator, COO, or Director can add estimation' 
+                            error: 'Only Estimator or COO can add estimation' 
                         });
-                    }
-                    
-                    // Validate estimation data
-                    if (!data.totalManhours || data.totalManhours <= 0) {
-                        return res.status(400).json({ 
-                            success: false, 
-                            error: 'Total manhours must be greater than 0' 
-                        });
-                    }
-                    
-                    // Validate based on rate method
-                    if (data.rateMethod === 'hourly' || data.rateMethod === 'combined') {
-                        if (!data.hourlyRate || data.hourlyRate <= 0) {
-                            return res.status(400).json({ 
-                                success: false, 
-                                error: 'Valid hourly rate is required for this rate method' 
-                            });
-                        }
-                    }
-                    
-                    if (data.rateMethod === 'tonnage' || data.rateMethod === 'combined') {
-                        if (!data.tonnage || data.tonnage <= 0) {
-                            return res.status(400).json({ 
-                                success: false, 
-                                error: 'Valid tonnage is required for this rate method' 
-                            });
-                        }
-                        if (!data.tonnageRate || data.tonnageRate <= 0) {
-                            return res.status(400).json({ 
-                                success: false, 
-                                error: 'Valid tonnage rate is required for this rate method' 
-                            });
-                        }
                     }
                     
                     updates = {
                         estimation: {
-                            totalManhours: parseFloat(data.totalManhours),
-                            tonnage: data.tonnage ? parseFloat(data.tonnage) : null,
-                            rateMethod: data.rateMethod || 'none',
-                            hourlyRate: data.hourlyRate ? parseFloat(data.hourlyRate) : null,
-                            tonnageRate: data.tonnageRate ? parseFloat(data.tonnageRate) : null,
-                            estimatedValue: parseFloat(data.estimatedValue || 0),
-                            breakdown: data.breakdown || {},
-                            notes: data.notes || '',
+                            manhours: data.manhours || 0,
+                            boqUploaded: data.boqUploaded || false,
                             estimatorName: req.user.name,
-                            estimatorUid: req.user.uid,
-                            estimatedAt: admin.firestore.FieldValue.serverTimestamp(),
-                            // Keep backward compatibility
-                            manhours: parseFloat(data.totalManhours),
-                            boqUploaded: data.boqUploaded || false
+                            estimatorUid: req.user.uid, // Storing estimator UID
+                            estimatedAt: new Date().toISOString(),
+                            notes: data.notes || ''
                         },
                         status: 'estimation_complete'
                     };
-                    
-                    activityDetail = `Estimation added by ${req.user.name}: ${data.totalManhours} manhours`;
-                    
-                    if (data.rateMethod !== 'none') {
-                        activityDetail += `, estimated value: $${parseFloat(data.estimatedValue || 0).toFixed(2)}`;
-                    }
-                    
-                    if (data.tonnage) {
-                        activityDetail += `, tonnage: ${data.tonnage} tons`;
-                    }
+                    activityDetail = `Estimation completed: ${data.manhours} manhours`;
                     
                     await db.collection('notifications').add({
                         type: 'estimation_complete',
                         recipientRole: 'coo',
                         proposalId: id,
-                        message: `Estimation completed for "${proposal.projectName}" - ${data.totalManhours} hours${data.tonnage ? `, ${data.tonnage} tons` : ''}, Value: $${parseFloat(data.estimatedValue || 0).toFixed(2)}`,
+                        message: `Estimation completed for ${proposal.projectName}`,
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                        isRead: false,
-                        priority: 'normal'
+                        isRead: false
                     });
                     break;
                     
@@ -913,7 +631,7 @@ const handler = async (req, res) => {
                         recipientUid: proposal.createdByUid,
                         recipientRole: 'bdm',
                         proposalId: id,
-                        message: `Your proposal "${proposal.projectName}" has been approved by ${req.user.name}. You can now submit it to the client.`,
+                        message: `Your proposal "${proposal.projectName}" has been approved by Director. You can now submit to client.`,
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         isRead: false,
                         priority: 'high'
@@ -924,12 +642,12 @@ const handler = async (req, res) => {
                         type: 'proposal_approved',
                         recipientRole: 'coo',
                         proposalId: id,
-                        message: `Proposal "${proposal.projectName}" has been approved by Director ${req.user.name}`,
+                        message: `Proposal "${proposal.projectName}" approved by Director ${req.user.name}`,
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         isRead: false
                     });
                     break;
-                    
+
                 case 'reject_proposal':
                     // Only Director can reject proposals
                     if (req.user.role !== 'director') {
@@ -953,7 +671,7 @@ const handler = async (req, res) => {
                             rejectedBy: req.user.name,
                             rejectedByUid: req.user.uid,
                             rejectedAt: admin.firestore.FieldValue.serverTimestamp(),
-                            reason: data.reason.trim(),
+                            reason: data.reason,
                             comments: data.comments || ''
                         }
                     };
@@ -966,7 +684,7 @@ const handler = async (req, res) => {
                         recipientUid: proposal.createdByUid,
                         recipientRole: 'bdm',
                         proposalId: id,
-                        message: `Your proposal "${proposal.projectName}" has been rejected by ${req.user.name}. Reason: ${data.reason}`,
+                        message: `Your proposal "${proposal.projectName}" was rejected by Director. Reason: ${data.reason}`,
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         isRead: false,
                         priority: 'high'
@@ -977,117 +695,34 @@ const handler = async (req, res) => {
                         type: 'proposal_rejected',
                         recipientRole: 'coo',
                         proposalId: id,
-                        message: `Proposal "${proposal.projectName}" rejected by Director ${req.user.name}. Reason: ${data.reason}`,
+                        message: `Proposal "${proposal.projectName}" rejected by Director ${req.user.name}`,
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         isRead: false
                     });
+                    
+                    // Notify Estimator if estimation was done
+                    if (proposal.estimation && proposal.estimation.estimatorUid) {
+                        await db.collection('notifications').add({
+                            type: 'proposal_rejected',
+                            recipientUid: proposal.estimation.estimatorUid,
+                            recipientRole: 'estimator',
+                            proposalId: id,
+                            message: `Proposal "${proposal.projectName}" was rejected by Director`,
+                            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                            isRead: false
+                        });
+                    }
                     break;
-                    
+                
                 // ==================================================================
-                // == END OF DIRECTOR APPROVE/REJECT ==
+                // == REQUEST DIRECTOR APPROVAL (Optional - for explicit workflow) ==
                 // ==================================================================
-
-                case 'create_project':
-                    // Only COO or Director can create projects
-                    if (!['coo', 'director'].includes(req.user.role)) {
-                        return res.status(403).json({ 
-                            success: false, 
-                            error: 'Only COO or Director can create projects' 
-                        });
-                    }
-                    
-                    if (proposal.status !== 'won') {
-                        return res.status(400).json({ 
-                            success: false, 
-                            error: 'Only WON proposals can be converted to projects' 
-                        });
-                    }
-                    
-                    if (proposal.projectCreated) {
-                        return res.status(400).json({ 
-                            success: false, 
-                            error: 'This proposal has already been converted to a project' 
-                        });
-                    }
-                    
-                    if (!proposal.pricing || !proposal.pricing.projectNumber) {
-                        return res.status(400).json({ 
-                            success: false, 
-                            error: 'Proposal must have pricing and project number before creating a project' 
-                        });
-                    }
-                    
-                    // Create the project
-                    const projectData = {
-                        projectName: proposal.projectName,
-                        projectCode: proposal.pricing.projectNumber,
-                        clientCompany: proposal.clientCompany,
-                        projectType: proposal.projectType,
-                        scopeOfWork: proposal.scopeOfWork,
-                        timeline: proposal.timeline,
-                        priority: proposal.priority,
-                        country: proposal.country,
-                        projectLinks: proposal.projectLinks || [],
-                        status: 'needs_allocation',
-                        designStatus: 'not_started',
-                        totalManHours: proposal.estimation?.manhours || proposal.estimation?.totalManhours || 0,
-                        quoteValue: proposal.pricing.quoteValue,
-                        currency: proposal.pricing.currency,
-                        bdmName: proposal.createdByName,
-                        bdmUid: proposal.createdByUid,
-                        proposalId: id,
-                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                        createdByName: req.user.name,
-                        createdByUid: req.user.uid,
-                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-                    };
-                    
-                    const projectRef = await db.collection('projects').add(projectData);
-                    
-                    updates = {
-                        projectCreated: true,
-                        projectId: projectRef.id,
-                        allocationStatus: 'needs_allocation'
-                    };
-                    
-                    activityDetail = `Project created from proposal by ${req.user.name}`;
-                    
-                    // Log project creation activity
-                    await db.collection('activities').add({
-                        type: 'project_created',
-                        details: `Project created from proposal: ${proposal.projectName}`,
-                        performedByName: req.user.name,
-                        performedByRole: req.user.role,
-                        performedByUid: req.user.uid,
-                        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                        projectId: projectRef.id,
-                        proposalId: id,
-                        projectName: proposal.projectName
-                    });
-                    
-                    // Notify BDM
-                    await db.collection('notifications').add({
-                        type: 'project_created',
-                        recipientUid: proposal.createdByUid,
-                        recipientRole: 'bdm',
-                        proposalId: id,
-                        projectId: projectRef.id,
-                        message: `Your proposal "${proposal.projectName}" has been converted to a project!`,
-                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                        isRead: false,
-                        priority: 'normal'
-                    });
-                    break;
-
-                // ============================================
-                // == BDM REQUEST FOR APPROVAL (NEW CASE) ==
-                // ============================================
                 case 'request_approval':
-                    // Only BDM who created the proposal can request approval
-                    if (req.user.role !== 'bdm' || proposal.createdByUid !== req.user.uid) {
+                    // COO or BDM can request approval
+                    if (!['coo', 'bdm'].includes(req.user.role)) {
                         return res.status(403).json({ 
                             success: false, 
-                            error: 'Only the BDM who created this proposal can request approval' 
+                            error: 'Only COO or BDM can request approval' 
                         });
                     }
                     
@@ -1213,17 +848,7 @@ const handler = async (req, res) => {
                 });
             }
 
-            // Delete associated PDF files from storage
-            if (proposalData.pdfFiles && proposalData.pdfFiles.length > 0) {
-                const deletePromises = proposalData.pdfFiles.map(file => {
-                    return bucket.file(file.storagePath).delete().catch(err => {
-                        console.warn('File not found in storage:', file.storagePath);
-                    });
-                });
-                await Promise.all(deletePromises);
-            }
-
-            // Delete associated files from 'files' collection
+            // Delete associated files
             const filesSnapshot = await db.collection('files').where('proposalId', '==', id).get();
             if (!filesSnapshot.empty) {
                 const deletePromises = filesSnapshot.docs.map(doc => {

@@ -259,20 +259,63 @@ const handler = async (req, res) => {
             }, 0);
             
             const newTotal = totalHours + hours;
+            let requestUsed = null; // Will store ID of approved request if used
             
+            // ============================================
+            // START: REPLACEMENT BLOCK
+            // ============================================
             // Check if exceeds allocated hours
             const allocatedHours = project.allocatedHours || 0;
             if (allocatedHours > 0 && newTotal > allocatedHours) {
-                return res.status(400).json({ 
-                    success: false, 
-                    error: `Hours exceed allocation. Allocated: ${allocatedHours}h, Used: ${totalHours}h, Trying to add: ${hours}h`,
-                    exceedsAllocation: true,
-                    totalHours,
-                    allocatedHours,
-                    remainingHours: allocatedHours - totalHours,
-                    exceededBy: newTotal - allocatedHours
-                });
+                // Check if designer has an approved time request for this project
+                const approvedRequestSnapshot = await db.collection('timeRequests')
+                    .where('projectId', '==', projectId)
+                    .where('designerUid', '==', req.user.uid)
+                    .where('status', '==', 'approved')
+                    .orderBy('createdAt', 'desc')
+                    .limit(1)
+                    .get();
+                                
+                let canProceed = false;
+                // requestUsed is already defined outside this block
+                                
+                if (!approvedRequestSnapshot.empty) {
+                    const approvedRequest = approvedRequestSnapshot.docs[0];
+                    const requestData = approvedRequest.data();
+                                        
+                    // Check if the approved hours cover this submission
+                    const newAllocatedHours = project.allocatedHours; // Already updated by approval
+                    if (newTotal <= newAllocatedHours) {
+                        canProceed = true;
+                        requestUsed = approvedRequest.id;
+                                                
+                        // Mark the request as used
+                        await approvedRequest.ref.update({
+                            status: 'used',
+                            usedAt: admin.firestore.FieldValue.serverTimestamp(),
+                            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                        });
+                    }
+                }
+                                
+                if (!canProceed) {
+                    return res.status(400).json({ 
+                        success: false, 
+                        error: `Hours exceed allocation. Allocated: ${allocatedHours}h, Used: ${totalHours}h, Trying to add: ${hours}h`,
+                        exceedsAllocation: true,
+                        totalHours,
+                        allocatedHours,
+                        remainingHours: allocatedHours - totalHours,
+                        exceededBy: newTotal - allocatedHours,
+                        projectId,
+                        projectName: project.projectName
+                    });
+                }
             }
+            // ============================================
+            // END: REPLACEMENT BLOCK
+            // ============================================
+
             
             // Create timesheet entry
             const timesheetData = {
@@ -286,6 +329,9 @@ const handler = async (req, res) => {
                 description: description || '',
                 taskId: taskId || null,
                 status: 'submitted',
+                // Add these fields if time request was used
+                additionalTimeApproved: !!requestUsed,
+                additionalTimeRequestId: requestUsed || null,
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
                 updatedAt: admin.firestore.FieldValue.serverTimestamp()
             };
@@ -420,7 +466,7 @@ const handler = async (req, res) => {
             const timesheetDoc = await timesheetRef.get();
             
             if (!timesheetDoc.exists) {
-                return res.status(404).json({ success: false, error: 'Timesheet entry not found' });
+                return res.status(4404).json({ success: false, error: 'Timesheet entry not found' });
             }
             
             const timesheet = timesheetDoc.data();

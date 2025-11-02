@@ -1,5 +1,5 @@
 const express = require('express');
-const { db } = require('../firebaseAdmin'); // Adjust this path to your firebase-admin setup
+const { db } = require('./_firebase-admin'); // Correct path to the file in the SAME directory
 const { FieldValue } = require('firebase-admin/firestore');
 
 const timesheetsRouter = express.Router();

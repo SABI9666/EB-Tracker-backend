@@ -1,8 +1,6 @@
 const express = require('express');
-// --- THIS IS THE FIX ---
-const { admin } = require('./_firebase-admin'); // Import admin
-const db = admin.firestore(); // Get the db instance from admin
-// --- END FIX ---
+const admin = require('./_firebase-admin'); // <<< THIS IS THE FIX (removed curly braces)
+const db = admin.firestore(); // This will now work
 const { FieldValue } = require('firebase-admin/firestore');
 
 const timesheetsRouter = express.Router();

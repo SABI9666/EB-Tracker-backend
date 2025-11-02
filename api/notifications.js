@@ -1,4 +1,5 @@
 // api/notifications.js - Complete handler with sorting workaround
+// NO CHANGES to existing functionality - this file remains unchanged
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');

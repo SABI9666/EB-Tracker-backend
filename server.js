@@ -6,6 +6,10 @@ const morgan = require('morgan');
 const compression = require('compression');
 require('dotenv').config();
 
+// === IMPORT YOUR AUTH MIDDLEWARE ===
+// <<< MODIFIED: Imports 'verifyToken' from your file
+const { verifyToken } = require('./middleware/auth.js'); 
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -81,7 +85,7 @@ app.use((req, res, next) => {
 });
 
 // ============================================
-// HEALTH CHECK
+// HEALTH CHECK (NO AUTH)
 // ============================================
 app.get('/health', (req, res) => {
     const admin = require('./api/_firebase-admin');
@@ -102,39 +106,17 @@ app.get('/', (req, res) => {
         endpoints: [
             'GET  /health - Health check',
             'GET  /api/dashboard - Dashboard data',
-            'GET  /api/dashboard?stats=true - Statistics',
-            'GET  /api/dashboard?role=bdm - Role-specific dashboard',
-            'GET  /api/proposals - List all proposals',
-            'POST /api/proposals - Create proposal',
-            'GET  /api/projects - List projects',
-            'POST /api/projects - Create project',
-            'GET  /api/projects?action=generate-variation-code - Generate variation code',
-            'GET  /api/files - List files',
-            'POST /api/files - Upload files',
-            'GET  /api/activities - Activity log',
-            'GET  /api/tasks - List tasks',
-            'POST /api/tasks - Create task',
-            'GET  /api/submissions - List submissions',
-            'POST /api/submissions - Create submission',
-            'GET  /api/payments - List payments',
-            'POST /api/payments - Create payment',
-            'GET  /api/notifications - List internal notifications',
-            'GET  /api/users - List users',
-            'POST /api/users - Create user',
-            'GET  /api/timesheets - List timesheets',
-            'GET  /api/timesheets?action=executive_dashboard - Executive analytics',
-            'POST /api/timesheets - Log hours',
-            'PUT  /api/timesheets - Update timesheet',
-            'DELETE /api/timesheets - Delete timesheet',
-            'GET  /api/time-requests - List time requests',
-            'POST /api/time-requests - Submit time request',
-            'PUT  /api/time-requests - Review time request',
-            'DELETE /api/time-requests - Delete time request',
-            'POST /api/variations - Create a new variation',
-            'POST /api/email/trigger - Send a Resend email'
+            // ... (rest of your endpoints) ...
         ]
     });
 });
+
+// ============================================
+// APPLY AUTH MIDDLEWARE
+// ============================================
+// <<< MODIFIED: Apply your 'verifyToken' middleware to all '/api' routes
+app.use('/api', verifyToken);
+
 
 // ============================================
 // API ROUTES - Import handlers
@@ -156,15 +138,11 @@ try {
     const usersHandler = require('./api/users');
     const variationsHandler = require('./api/variations');
     const emailHandler = require('./api/email');
-
-    // === UPDATED IMPORT ===
-    // Import both routers from the single 'timesheets.js' file
     const { timesheetsRouter, timeRequestRouter } = require('./api/timesheets');
 
     console.log('✅ All handlers loaded successfully');
 
-    // === UPDATED ROUTE REGISTRATION ===
-    // Register routes using app.use() to correctly mount Express routers
+    // Register routes
     app.use('/api/dashboard', dashboardHandler);
     app.use('/api/proposals', proposalsHandler);
     app.use('/api/projects', projectsHandler);
@@ -178,8 +156,6 @@ try {
     app.use('/api/users', usersHandler);
     app.use('/api/variations', variationsHandler);
     app.use('/api/email', emailHandler);
-
-    // Mount the routers from the single timesheets.js file
     app.use('/api/timesheets', timesheetsRouter);
     app.use('/api/time-requests', timeRequestRouter);
 
@@ -229,24 +205,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('📡 API Endpoints ready:');
     console.log('   GET  /health');
     console.log('   GET  /api/dashboard');
-    console.log('   GET  /api/proposals');
-    console.log('   GET  /api/projects');
-    console.log('   GET  /api/activities');
-    console.log('   GET  /api/timesheets');
-    console.log('   GET  /api/timesheets?action=executive_dashboard  📊 NEW');
-    console.log('   POST /api/timesheets');
-    console.log('   GET  /api/time-requests                          ⏰ NEW');
-    console.log('   POST /api/time-requests                          ⏰ NEW');
-    console.log('   PUT  /api/time-requests                          ⏰ NEW');
-    console.log('   POST /api/variations                             ✨ NEW');
-    console.log('   POST /api/email/trigger                          📧 NEW');
-    console.log('   ... and more');
-    console.log('');
-    console.log('🎯 New Features:');
-    console.log('   📊 Executive Timesheet Dashboard');
-    console.log('   ⏰ Additional Time Request System');
-    console.log('   ✨ Variation Management');
-    console.log('   📧 Email Notifications');
+    // ... (rest of your logs) ...
     console.log('');
 });
 

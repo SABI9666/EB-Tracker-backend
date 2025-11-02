@@ -53,7 +53,25 @@ const handler = async (req, res) => {
                 if (!doc.exists) {
                     return res.status(404).json({ success: false, error: 'Time request not found' });
                 }
-                return res.status(200).json({ success: true, data: { id: doc.id, ...doc.data() } });
+                // --- FIX: Add project details to single request ---
+                const requestData = doc.data();
+                const projectDoc = await db.collection('projects').doc(requestData.projectId).get();
+                const projectData = projectDoc.exists ? projectDoc.data() : {};
+
+                return res.status(200).json({ 
+                    success: true, 
+                    data: { 
+                        id: doc.id, 
+                        ...requestData,
+                        projectName: projectData.projectName || requestData.projectName,
+                        projectCode: projectData.projectCode || requestData.projectCode,
+                        clientCompany: projectData.clientCompany || requestData.clientCompany,
+                        designLeadName: projectData.designLeadName || requestData.designLeadName,
+                        currentAllocatedHours: projectData.allocatedHours || requestData.currentAllocatedHours || 0,
+                        currentHoursLogged: projectData.hoursLogged || requestData.currentHoursLogged || 0,
+                        additionalHours: projectData.additionalHours || 0 // <-- ADD THIS
+                    } 
+                });
             }
             
             // Build query based on role
@@ -83,10 +101,27 @@ const handler = async (req, res) => {
             const snapshot = await query.limit(50).get();
             const requests = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             
+            // --- NEW: Enhance with project data ---
+            const populatedRequests = await Promise.all(requests.map(async (request) => {
+                const projectDoc = await db.collection('projects').doc(request.projectId).get();
+                const project = projectDoc.exists ? projectDoc.data() : {};
+
+                return {
+                    ...request,
+                    projectName: project.projectName || request.projectName,
+                    projectCode: project.projectCode || request.projectCode,
+                    clientCompany: project.clientCompany || request.clientCompany,
+                    designLeadName: project.designLeadName || request.designLeadName,
+                    currentAllocatedHours: project.allocatedHours || request.currentAllocatedHours || 0,
+                    currentHoursLogged: project.hoursLogged || request.currentHoursLogged || 0,
+                    additionalHours: project.additionalHours || 0 // <-- ADD THIS
+                };
+            }));
+            
             return res.status(200).json({ 
                 success: true, 
-                data: requests,
-                count: requests.length
+                data: populatedRequests, // <-- USE POPULATED
+                count: populatedRequests.length // <-- USE POPULATED
             });
         }
 
@@ -96,10 +131,11 @@ const handler = async (req, res) => {
         if (req.method === 'POST') {
             const { 
                 projectId, 
-                timesheetId, 
+                // timesheetId, // Old
                 requestedHours, 
                 reason, 
-                attachmentUrl 
+                attachmentUrl,
+                pendingTimesheetData // <-- ADD THIS
             } = req.body;
             
             // Validation
@@ -133,15 +169,10 @@ const handler = async (req, res) => {
                 }
             }
             
-            // Get current hours data
-            const timesheetsSnapshot = await db.collection('timesheets')
-                .where('projectId', '==', projectId)
-                .where('designerUid', '==', req.user.uid)
-                .get();
-            
-            const currentHoursLogged = timesheetsSnapshot.docs.reduce((sum, doc) => {
-                return sum + (doc.data().hours || 0);
-            }, 0);
+            // --- FIX: Get current hours from project doc ---
+            const currentHoursLogged = project.hoursLogged || 0;
+            const currentAllocatedHours = project.allocatedHours || 0;
+            const currentAdditionalHours = project.additionalHours || 0; // <-- ADD THIS
             
             // Create time request
             const requestData = {
@@ -154,11 +185,13 @@ const handler = async (req, res) => {
                 designerEmail: req.user.email,
                 designLeadUid: project.designLeadUid,
                 designLeadName: project.designLeadName,
-                timesheetId: timesheetId || null,
+                timesheetId: pendingTimesheetData ? 'pending' : null, // <-- USE THIS
+                pendingTimesheetData: pendingTimesheetData || null, // <-- ADD THIS
                 requestedHours: parseFloat(requestedHours),
                 reason: reason.trim(),
                 attachmentUrl: attachmentUrl || null,
-                currentAllocatedHours: project.allocatedHours || 0,
+                currentAllocatedHours: currentAllocatedHours, // <-- USE VARIABLE
+                currentAdditionalHours: currentAdditionalHours, // <-- ADD THIS
                 currentHoursLogged: currentHoursLogged,
                 status: 'pending',
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -257,7 +290,7 @@ const handler = async (req, res) => {
             
             const request = requestDoc.data();
             
-            if (request.status !== 'pending' && action !== 'request_info') {
+            if (request.status !== 'pending' && request.status !== 'info_requested') {
                 return res.status(400).json({ 
                     success: false, 
                     error: 'This request has already been processed' 
@@ -277,7 +310,8 @@ const handler = async (req, res) => {
             
             // Handle different actions
             if (action === 'approve') {
-                if (!approvedHours || approvedHours <= 0) {
+                const hoursToApprove = parseFloat(approvedHours);
+                if (!hoursToApprove || hoursToApprove <= 0) {
                     return res.status(400).json({ 
                         success: false, 
                         error: 'Approved hours is required for approval' 
@@ -285,30 +319,48 @@ const handler = async (req, res) => {
                 }
                 
                 updates.status = 'approved';
-                updates.approvedHours = parseFloat(approvedHours);
+                updates.approvedHours = hoursToApprove;
                 
                 // Update project allocation
                 await db.collection('projects').doc(request.projectId).update({
-                    allocatedHours: admin.firestore.FieldValue.increment(approvedHours),
+                    // --- FIX: Use additionalHours field ---
+                    additionalHours: admin.firestore.FieldValue.increment(hoursToApprove),
                     updatedAt: admin.firestore.FieldValue.serverTimestamp()
                 });
                 
                 // If applying to specific timesheet, update it
-                if (applyToTimesheet && request.timesheetId) {
-                    const timesheetRef = db.collection('timesheets').doc(request.timesheetId);
-                    const timesheetDoc = await timesheetRef.get();
+                // --- FIX: Check for pending timesheet data ---
+                if (applyToTimesheet && request.timesheetId === 'pending' && request.pendingTimesheetData) {
+                    // Create the new timesheet entry
+                    const timesheetData = {
+                        ...request.pendingTimesheetData,
+                        projectId: request.projectId,
+                        projectName: request.projectName,
+                        designerUid: request.designerUid,
+                        designerName: request.designerName,
+                        designerEmail: request.designerEmail,
+                        date: admin.firestore.Timestamp.fromDate(new Date(request.pendingTimesheetData.date)),
+                        hours: parseFloat(request.pendingTimesheetData.hours),
+                        status: 'approved', // Auto-approve
+                        additionalTimeApproved: true,
+                        additionalTimeRequestId: id,
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                    };
                     
-                    if (timesheetDoc.exists) {
-                        await timesheetRef.update({
-                            additionalTimeApproved: true,
-                            additionalTimeRequestId: id,
-                            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-                        });
-                    }
+                    const timesheetRef = await db.collection('timesheets').add(timesheetData);
+                    
+                    // Update the project's hoursLogged
+                    await db.collection('projects').doc(request.projectId).update({
+                        hoursLogged: admin.firestore.FieldValue.increment(timesheetData.hours)
+                    });
+                    
+                    // Link the timesheet to the request
+                    updates.timesheetId = timesheetRef.id;
                 }
                 
-                activityDetails = `Approved ${approvedHours}h additional time for ${request.projectName}`;
-                notificationMessage = `Your request for ${request.requestedHours}h has been approved (${approvedHours}h granted)`;
+                activityDetails = `Approved ${hoursToApprove}h additional time for ${request.projectName}`;
+                notificationMessage = `Your request for ${request.requestedHours}h has been approved (${hoursToApprove}h granted)`;
                 
             } else if (action === 'reject') {
                 if (!comment) {
@@ -413,7 +465,7 @@ const handler = async (req, res) => {
             }
             
             // Can only delete pending or rejected requests
-            if (!['pending', 'rejected'].includes(request.status)) {
+            if (!['pending', 'rejected', 'info_requested'].includes(request.status)) { // <-- ADD 'info_requested'
                 return res.status(400).json({ 
                     success: false, 
                     error: 'Cannot delete approved or processed requests' 
@@ -441,3 +493,4 @@ const handler = async (req, res) => {
 };
 
 module.exports = allowCors(handler);
+

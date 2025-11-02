@@ -1,499 +1,526 @@
-// api/timesheets.js - Timesheet management for designers with additional time requests
-const admin = require('./_firebase-admin');
-const { verifyToken } = require('../middleware/auth');
-const util = require('util');
+const express = require('express');
+const { db } = require('../firebaseAdmin'); // Adjust this path to your firebase-admin setup
+const { FieldValue } = require('firebase-admin/firestore');
 
-const db = admin.firestore();
+const timesheetsRouter = express.Router();
+const timeRequestRouter = express.Router();
 
-const allowCors = fn => async (req, res) => {
-    res.setHeader('Access-Control-Allow-Credentials', true);
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST,PUT,DELETE');
-    res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization');
-    if (req.method === 'OPTIONS') {
-        res.status(200).end();
-        return;
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
+
+/**
+ * Aggregates total logged hours for a project.
+ * This is a helper to avoid recalculating totals manually.
+ * @param {string} projectId The ID of the project to aggregate.
+ * @returns {Promise<number>} Total hours logged.
+ */
+const getAggregatedProjectHours = async (projectId) => {
+    try {
+        const timesheetsSnapshot = await db.collection('timesheets')
+            .where('projectId', '==', projectId)
+            .get();
+        
+        if (timesheetsSnapshot.empty) {
+            return 0;
+        }
+
+        let totalHours = 0;
+        timesheetsSnapshot.forEach(doc => {
+            totalHours += doc.data().hours || 0;
+        });
+
+        return totalHours;
+    } catch (error) {
+        console.error(`Error aggregating hours for project ${projectId}:`, error);
+        return 0;
     }
-    return await fn(req, res);
 };
 
-const handler = async (req, res) => {
+/**
+ * Updates the 'hoursLogged' field on a project document.
+ * @param {string} projectId The ID of the project to update.
+ */
+const updateProjectHoursLogged = async (projectId) => {
     try {
-        await util.promisify(verifyToken)(req, res);
+        const totalHours = await getAggregatedProjectHours(projectId);
+        await db.collection('projects').doc(projectId).update({
+            hoursLogged: totalHours
+        });
+        console.log(`Updated project ${projectId} to ${totalHours} logged hours.`);
+    } catch (error)
+    {
+        console.error(`Error updating project ${projectId} hours:`, error);
+    }
+};
 
-        // Parse JSON body for POST/PUT
-        if ((req.method === 'POST' || req.method === 'PUT') && req.headers['content-type'] === 'application/json') {
-            if (!req.body || Object.keys(req.body).length === 0) {
-                await new Promise((resolve) => {
-                    const chunks = [];
-                    req.on('data', (chunk) => chunks.push(chunk));
-                    req.on('end', () => {
-                        try {
-                            const bodyBuffer = Buffer.concat(chunks);
-                            req.body = bodyBuffer.length > 0 ? JSON.parse(bodyBuffer.toString()) : {};
-                        } catch (e) {
-                            console.error("Error parsing JSON body:", e);
-                            req.body = {};
-                        }
-                        resolve();
-                    });
-                });
-            }
-        }
 
-        // ============================================
-        // GET - Retrieve timesheets
-        // ============================================
-        if (req.method === 'GET') {
-            const { projectId, designerUid, id, action } = req.query;
-            
-            // Get executive dashboard analytics
-            if (action === 'executive_dashboard') {
-                if (!['coo', 'director'].includes(req.user.role)) {
-                    return res.status(403).json({ 
-                        success: false, 
-                        error: 'Only COO/Director can access executive dashboard' 
-                    });
+// ============================================
+// TIMESHEETS ROUTER (/api/timesheets)
+// ============================================
+
+/**
+ * GET /api/timesheets
+ * Handles:
+ * 1. ?action=executive_dashboard (for COO/Director)
+ * 2. ?projectId=... (for getting a project's timesheets)
+ * 3. No query (for a designer getting their own timesheets)
+ */
+timesheetsRouter.get('/', async (req, res) => {
+    const { action, projectId } = req.query;
+    const designerUid = req.user.uid; // From auth middleware
+
+    // 1. ================== EXECUTIVE DASHBOARD ==================
+    if (action === 'executive_dashboard') {
+        try {
+            // --- 1. Fetch all raw data ---
+            const projectsSnapshot = await db.collection('projects').get();
+            const timesheetsSnapshot = await db.collection('timesheets').get();
+            const designersSnapshot = await db.collection('users').where('role', '==', 'designer').get();
+
+            let allTimesheets = [];
+            timesheetsSnapshot.forEach(doc => allTimesheets.push({ id: doc.id, ...doc.data() }));
+
+            let allDesigners = {};
+            designersSnapshot.forEach(doc => {
+                allDesigners[doc.id] = { id: doc.id, ...doc.data(), totalHours: 0, projectsWorkedOn: new Set() };
+            });
+
+            // --- 2. Process Timesheets into Projects ---
+            let projectHours = {}; // { projectId: { logged: number, allocated: number, ... } }
+
+            projectsSnapshot.forEach(doc => {
+                const data = doc.data();
+                projectHours[doc.id] = {
+                    id: doc.id,
+                    ...data,
+                    // ===============================================================
+                    //  THE FIX: Read 'maxAllocatedHours' from the project document
+                    // ===============================================================
+                    allocatedHours: data.maxAllocatedHours || 0, 
+                    hoursLogged: 0, // Will be calculated next
+                };
+            });
+
+            // Aggregate logged hours from timesheets
+            allTimesheets.forEach(ts => {
+                if (projectHours[ts.projectId]) {
+                    projectHours[ts.projectId].hoursLogged += ts.hours || 0;
                 }
+                // Also aggregate designer stats
+                if (allDesigners[ts.designerUid]) {
+                    allDesigners[ts.designerUid].totalHours += ts.hours || 0;
+                    allDesigners[ts.designerUid].projectsWorkedOn.add(ts.projectId);
+                }
+            });
 
-                // Get all projects with their timesheet data
-                const projectsSnapshot = await db.collection('projects')
-                    .where('status', 'in', ['assigned', 'in_progress', 'completed'])
-                    .get();
+            // --- 3. Calculate Metrics and Format Data ---
+            const projects = Object.values(projectHours);
+            const designers = Object.values(allDesigners).map(d => ({
+                ...d,
+                projectsWorkedOn: d.projectsWorkedOn.size,
+            }));
+
+            let metrics = {
+                totalProjects: projects.length,
+                projectsWithTimeline: 0,
+                projectsAboveTimeline: 0,
+                totalExceededHours: 0,
+                totalAllocatedHours: 0,
+                totalLoggedHours: 0,
+            };
+
+            let analytics = {
+                exceededProjects: [],
+                withinTimelineProjects: [],
+                projectStatusDistribution: {},
+                designerDuration: designers.sort((a, b) => b.totalHours - a.totalHours),
+            };
+
+            projects.forEach(p => {
+                // Tally status for pie chart
+                const statusKey = p.status || 'unknown';
+                analytics.projectStatusDistribution[statusKey] = (analytics.projectStatusDistribution[statusKey] || 0) + 1;
                 
-                const projects = [];
-                const designersMap = new Map();
-                let totalProjects = 0;
-                let projectsWithTimeline = 0;
-                let projectsAboveTimeline = 0;
-                let totalExceededHours = 0;
-                const projectStatusDistribution = {}; // <-- ADD THIS
+                // Calculate timeline metrics
+                if (p.allocatedHours > 0) {
+                    metrics.projectsWithTimeline += 1;
+                    metrics.totalAllocatedHours += p.allocatedHours;
+                    metrics.totalLoggedHours += p.hoursLogged;
 
-                for (const projectDoc of projectsSnapshot.docs) {
-                    const project = { id: projectDoc.id, ...projectDoc.data() };
+                    p.percentageUsed = p.allocatedHours > 0 ? (p.hoursLogged / p.allocatedHours * 100) : 0;
                     
-                    // Get timesheets for this project
-                    const timesheetsSnapshot = await db.collection('timesheets')
-                        .where('projectId', '==', project.id)
-                        .get();
-                    
-                    const hoursLogged = timesheetsSnapshot.docs.reduce((sum, doc) => {
-                        return sum + (doc.data().hours || 0);
-                    }, 0);
-                    
-                    const allocatedHours = project.allocatedHours || 0;
-                    const isExceeded = hoursLogged > allocatedHours && allocatedHours > 0;
-                    const exceededBy = isExceeded ? hoursLogged - allocatedHours : 0;
-                    
-                    // <-- ADD THIS BLOCK START -->
-                    const status = project.status || 'unknown';
-                    if (projectStatusDistribution[status]) {
-                        projectStatusDistribution[status]++;
+                    if (p.hoursLogged > p.allocatedHours) {
+                        p.isExceeded = true;
+                        p.exceededBy = p.hoursLogged - p.allocatedHours;
+                        metrics.projectsAboveTimeline += 1;
+                        metrics.totalExceededHours += p.exceededBy;
+                        analytics.exceededProjects.push(p);
                     } else {
-                        projectStatusDistribution[status] = 1;
+                        p.isExceeded = false;
+                        p.exceededBy = 0;
+                        analytics.withinTimelineProjects.push(p);
                     }
-                    // <-- ADD THIS BLOCK END -->
-                    
-                    totalProjects++;
-                    if (allocatedHours > 0) projectsWithTimeline++;
-                    if (isExceeded) {
-                        projectsAboveTimeline++;
-                        totalExceededHours += exceededBy;
-                    }
-                    
-                    projects.push({
-                        id: project.id,
-                        projectName: project.projectName,
-                        projectCode: project.projectCode,
-                        clientCompany: project.clientCompany,
-                        allocatedHours: allocatedHours,
-                        hoursLogged: hoursLogged,
-                        percentageUsed: allocatedHours > 0 ? (hoursLogged / allocatedHours * 100).toFixed(1) : 0,
-                        isExceeded: isExceeded,
-                        exceededBy: exceededBy,
-                        status: project.status,
-                        designLeadName: project.designLeadName,
-                        assignedDesigners: project.assignedDesigners || []
-                    });
-                    
-                    // Collect designer data
-                    timesheetsSnapshot.docs.forEach(doc => {
-                        const timesheet = doc.data();
-                        if (!designersMap.has(timesheet.designerUid)) {
-                            designersMap.set(timesheet.designerUid, {
-                                uid: timesheet.designerUid,
-                                name: timesheet.designerName,
-                                email: timesheet.designerEmail,
-                                totalHours: 0,
-                                projectsWorkedOn: new Set()
-                            });
-                        }
-                        const designer = designersMap.get(timesheet.designerUid);
-                        designer.totalHours += timesheet.hours || 0;
-                        designer.projectsWorkedOn.add(project.id);
-                    });
+                } else {
+                    // Project has no timeline
+                    p.isExceeded = false;
+                    p.exceededBy = 0;
+                    p.percentageUsed = 0;
                 }
-                
-                // Convert designers map to array
-                const designers = Array.from(designersMap.values()).map(d => ({
-                    ...d,
-                    projectsWorkedOn: d.projectsWorkedOn.size
-                }));
-                
-                // Calculate analytics
-                const exceededProjects = projects.filter(p => p.isExceeded);
-                const withinTimelineProjects = projects.filter(p => 
-                    !p.isExceeded && p.allocatedHours > 0 && p.hoursLogged > 0
-                );
-                
-                return res.status(200).json({
-                    success: true,
-                    data: {
-                        metrics: {
-                            totalProjects,
-                            projectsWithTimeline,
-                            projectsAboveTimeline,
-                            totalExceededHours: totalExceededHours.toFixed(1),
-                            averageHoursPerProject: totalProjects > 0 
-                                ? (projects.reduce((sum, p) => sum + p.hoursLogged, 0) / totalProjects).toFixed(1) 
-                                : 0
-                        },
-                        projects: projects.sort((a, b) => b.percentageUsed - a.percentageUsed),
-                        designers: designers.sort((a, b) => b.totalHours - a.totalHours),
-                        analytics: {
-                            exceededProjects,
-                            withinTimelineProjects,
-                            projectsAboveTimeline: exceededProjects,
-                            designerDuration: designers.map(d => ({
-                                name: d.name,
-                                totalHours: d.totalHours,
-                                projectCount: d.projectsWorkedOn
-                            })),
-                            projectStatusDistribution // <-- ADD THIS
-                        }
-                    }
-                });
-            }
-            
-            // Get single timesheet entry
-            if (id) {
-                const doc = await db.collection('timesheets').doc(id).get();
-                if (!doc.exists) {
-                    return res.status(404).json({ success: false, error: 'Timesheet entry not found' });
-                }
-                return res.status(200).json({ success: true, data: { id: doc.id, ...doc.data() } });
-            }
-            
-            // Get timesheets for a project
-            let query = db.collection('timesheets').orderBy('date', 'desc');
-            
-            if (projectId) {
-                query = query.where('projectId', '==', projectId);
-            }
-            
-            // Designers can only see their own timesheets
-            if (req.user.role === 'designer') {
-                query = query.where('designerUid', '==', req.user.uid);
-            } else if (designerUid) {
-                // Design Lead/COO can filter by designer
-                query = query.where('designerUid', '==', designerUid);
-            }
-            
-            const snapshot = await query.limit(100).get();
-            const timesheets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            
-            // Calculate total hours for each project
-            const projectHours = {};
-            timesheets.forEach(entry => {
-                if (!projectHours[entry.projectId]) {
-                    projectHours[entry.projectId] = 0;
-                }
-                projectHours[entry.projectId] += entry.hours || 0;
             });
-            
-            return res.status(200).json({ 
-                success: true, 
-                data: timesheets,
-                summary: { projectHours }
-            });
-        }
 
-        // ============================================
-        // POST - Create timesheet entry
-        // ============================================
-        if (req.method === 'POST') {
-            const { projectId, date, hours, description, taskId } = req.body;
-            
-            // Validation
-            if (!projectId) {
-                return res.status(400).json({ success: false, error: 'Project ID is required' });
-            }
-            
-            if (!date) {
-                return res.status(400).json({ success: false, error: 'Date is required' });
-            }
-            
-            if (!hours || hours <= 0) {
-                return res.status(400).json({ success: false, error: 'Hours must be greater than 0' });
-            }
-            
-            if (hours > 24) {
-                return res.status(400).json({ success: false, error: 'Hours cannot exceed 24 per day' });
-            }
-            
-            // Get project to check allocation
-            const projectDoc = await db.collection('projects').doc(projectId).get();
-            if (!projectDoc.exists) {
-                return res.status(404).json({ success: false, error: 'Project not found' });
-            }
-            
-            const project = projectDoc.data();
-            
-            // Check if user is assigned to project
-            if (req.user.role === 'designer') {
-                if (!project.assignedDesigners || !project.assignedDesigners.includes(req.user.uid)) {
-                    return res.status(403).json({ 
-                        success: false, 
-                        error: 'You are not assigned to this project' 
-                    });
+            metrics.averageHoursPerProject = projects.length > 0 ? (metrics.totalLoggedHours / projects.length) : 0;
+
+            // --- 4. Send Response ---
+            return res.status(200).json({
+                success: true,
+                data: {
+                    metrics,
+                    projects,
+                    designers: designers.map(d => ({ // Send only what's needed
+                        name: d.name,
+                        email: d.email,
+                        totalHours: d.totalHours,
+                        projectsWorkedOn: d.projectsWorkedOn,
+                    })),
+                    analytics
                 }
-            }
-            
-            // Calculate total hours logged for this project by this designer
-            const existingTimesheets = await db.collection('timesheets')
+            });
+
+        } catch (error) {
+            console.error('Error in GET /timesheets (executive_dashboard):', error);
+            return res.status(500).json({ success: false, error: error.message });
+        }
+    }
+
+    // 2. ================== GET TIMESHEETS FOR ONE PROJECT ==================
+    if (projectId) {
+        try {
+            const timesheets = [];
+            const snapshot = await db.collection('timesheets')
                 .where('projectId', '==', projectId)
-                .where('designerUid', '==', req.user.uid)
+                .orderBy('date', 'desc')
                 .get();
             
-            const totalHours = existingTimesheets.docs.reduce((sum, doc) => {
-                return sum + (doc.data().hours || 0);
-            }, 0);
-            
-            const newTotal = totalHours + hours;
-            // let requestUsed = null; // This is old logic
-            
-            // ============================================
-            // START: REPLACEMENT BLOCK
-            // ============================================
-            
-            const allocatedHours = project.allocatedHours || 0;
-            const additionalHours = project.additionalHours || 0; // Get approved additional hours
-            const totalAllowedHours = allocatedHours + additionalHours;
-
-            // Check if exceeds allocated hours. If so, just return the error.
-            // The frontend will handle showing the "Request Time" modal.
-            if (totalAllowedHours > 0 && newTotal > totalAllowedHours) {
-                // If it exceeds, just return the error.
-                return res.status(400).json({ 
-                    success: false, 
-                    error: `Hours exceed total allocation. Allocated: ${allocatedHours}h, Additional: ${additionalHours}h, Used: ${totalHours}h, Trying to add: ${hours}h`,
-                    exceedsAllocation: true, // This is the key
-                    totalHours,
-                    allocatedHours: totalAllowedHours,
-                    remainingHours: totalAllowedHours - totalHours,
-                    exceededBy: newTotal - totalAllowedHours,
-                    projectId,
-                    projectName: project.projectName
-                });
-            }
-            // ============================================
-            // END: REPLACEMENT BLOCK
-            // ============================================
-
-            
-            // Create timesheet entry
-            const timesheetData = {
-                projectId,
-                projectName: project.projectName,
-                designerUid: req.user.uid,
-                designerName: req.user.name,
-                designerEmail: req.user.email,
-                date: admin.firestore.Timestamp.fromDate(new Date(date)),
-                hours: parseFloat(hours),
-                description: description || '',
-                taskId: taskId || null,
-                status: 'submitted',
-                // Add these fields if time request was used
-                additionalTimeApproved: newTotal > allocatedHours, // Mark if it used additional (previously approved) time
-                additionalTimeRequestId: null, // This is now linked from the request side
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            };
-            
-            const timesheetRef = await db.collection('timesheets').add(timesheetData);
-            
-            // Update project with new hours
-            await db.collection('projects').doc(projectId).update({
-                hoursLogged: admin.firestore.FieldValue.increment(hours),
-                lastTimesheetUpdate: admin.firestore.FieldValue.serverTimestamp(),
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-            
-            // Log activity
-            await db.collection('activities').add({
-                type: 'timesheet_logged',
-                details: `${req.user.name} logged ${hours} hours on ${project.projectName}`,
-                performedByName: req.user.name,
-                performedByRole: req.user.role,
-                performedByUid: req.user.uid,
-                timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                projectId: projectId,
-                timesheetId: timesheetRef.id
-            });
-            
-            // Notify Design Lead if hours are running low
-            if (allocatedHours > 0) {
-                const percentUsed = (newTotal / (project.allocatedHours || 0)) * 100; // Use original allocated hours for notification
-                if (percentUsed >= 80 && project.designLeadUid) {
-                    await db.collection('notifications').add({
-                        type: 'timesheet_warning',
-                        recipientUid: project.designLeadUid,
-                        recipientRole: 'design_lead',
-                        message: `Project "${project.projectName}" has used ${percentUsed.toFixed(0)}% of allocated hours`,
-                        projectId: projectId,
-                        projectName: project.projectName,
-                        hoursUsed: newTotal,
-                        hoursAllocated: allocatedHours,
-                        priority: percentUsed >= 90 ? 'high' : 'normal',
-                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                        isRead: false
-                    });
-                }
-            }
-            
-            return res.status(201).json({ 
-                success: true, 
-                message: 'Timesheet entry created',
-                timesheetId: timesheetRef.id,
-                totalHours: newTotal,
-                allocatedHours: totalAllowedHours,
-                remainingHours: totalAllowedHours - newTotal
-            });
+            snapshot.forEach(doc => timesheets.push({ id: doc.id, ...doc.data() }));
+            return res.status(200).json({ success: true, data: timesheets });
+        } catch (error) {
+            console.error('Error in GET /timesheets (projectId):', error);
+            return res.status(500).json({ success: false, error: error.message });
         }
-
-        // ============================================
-        // PUT - Update timesheet entry
-        // ============================================
-        if (req.method === 'PUT') {
-            const { id } = req.query;
-            const { hours, description, status } = req.body;
-            
-            if (!id) {
-                return res.status(400).json({ success: false, error: 'Timesheet ID is required' });
-            }
-            
-            const timesheetRef = db.collection('timesheets').doc(id);
-            const timesheetDoc = await timesheetRef.get();
-            
-            if (!timesheetDoc.exists) {
-                return res.status(404).json({ success: false, error: 'Timesheet entry not found' });
-            }
-            
-            const timesheet = timesheetDoc.data();
-            
-            // Only designer who created it can edit, or Design Lead/COO can approve/reject
-            if (req.user.role === 'designer' && timesheet.designerUid !== req.user.uid) {
-                return res.status(403).json({ 
-                    success: false, 
-                    error: 'You can only edit your own timesheet entries' 
-                });
-            }
-            
-            const updates = {
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            };
-            
-            // Designer can update hours and description if not yet approved
-            if (req.user.role === 'designer' && timesheet.status === 'submitted') {
-                if (hours !== undefined) {
-                    const oldHours = timesheet.hours;
-                    const hoursDiff = hours - oldHours;
-                    updates.hours = parseFloat(hours);
-                    
-                    // Update project hours
-                    await db.collection('projects').doc(timesheet.projectId).update({
-                        hoursLogged: admin.firestore.FieldValue.increment(hoursDiff)
-                    });
-                }
-                if (description !== undefined) {
-                    updates.description = description;
-                }
-            }
-            
-            // Design Lead/COO can approve or reject
-            if (['design_lead', 'coo', 'director'].includes(req.user.role) && status) {
-                updates.status = status;
-                updates.reviewedBy = req.user.name;
-                updates.reviewedByUid = req.user.uid;
-                updates.reviewedAt = admin.firestore.FieldValue.serverTimestamp();
-            }
-            
-            await timesheetRef.update(updates);
-            
-            return res.status(200).json({ 
-                success: true, 
-                message: 'Timesheet entry updated' 
-            });
-        }
-
-        // ============================================
-        // DELETE - Delete timesheet entry
-        // ============================================
-        if (req.method === 'DELETE') {
-            const { id } = req.query;
-            
-            if (!id) {
-                return res.status(400).json({ success: false, error: 'Timesheet ID is required' });
-            }
-            
-            const timesheetRef = db.collection('timesheets').doc(id);
-            const timesheetDoc = await timesheetRef.get();
-            
-            if (!timesheetDoc.exists) {
-                return res.status(4404).json({ success: false, error: 'Timesheet entry not found' });
-            }
-            
-            const timesheet = timesheetDoc.data();
-            
-            // Only designer who created it or COO/Director can delete
-            if (req.user.role === 'designer' && timesheet.designerUid !== req.user.uid) {
-                return res.status(403).json({ 
-                    success: false, 
-                    error: 'You can only delete your own timesheet entries' 
-                });
-            }
-            
-            if (!['designer', 'coo', 'director'].includes(req.user.role)) {
-                return res.status(403).json({ 
-                    success: false, 
-                    error: 'Permission denied' 
-                });
-            }
-            
-            // Update project hours
-            await db.collection('projects').doc(timesheet.projectId).update({
-                hoursLogged: admin.firestore.FieldValue.increment(-timesheet.hours)
-            });
-            
-            await timesheetRef.delete();
-            
-            return res.status(200).json({ 
-                success: true, 
-                message: 'Timesheet entry deleted' 
-            });
-        }
-
-        return res.status(405).json({ success: false, error: 'Method not allowed' });
-        
-    } catch (error) {
-        console.error('Timesheets API error:', error);
-        return res.status(500).json({ 
-            success: false, 
-            error: 'Internal Server Error', 
-            message: error.message 
-        });
     }
+
+    // 3. ================== GET MY TIMESHEETS (DESIGNER) ==================
+    try {
+        const timesheets = [];
+        const snapshot = await db.collection('timesheets')
+            .where('designerUid', '==', designerUid)
+            .orderBy('date', 'desc')
+            .get();
+        
+        snapshot.forEach(doc => timesheets.push({ id: doc.id, ...doc.data() }));
+        return res.status(200).json({ success: true, data: timesheets });
+    } catch (error) {
+        console.error('Error in GET /timesheets (designer):', error);
+        return res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+
+/**
+ * POST /api/timesheets
+ * A designer logs new hours.
+ */
+timesheetsRouter.post('/', async (req, res) => {
+    try {
+        const { projectId, date, hours, description } = req.body;
+        const { uid, name, email } = req.user;
+
+        if (!projectId || !date || !hours || !description) {
+            return res.status(400).json({ success: false, error: 'Missing required fields.' });
+        }
+
+        // --- 1. Get Project and Current Hours ---
+        const projectDoc = await db.collection('projects').doc(projectId).get();
+        if (!projectDoc.exists) {
+            return res.status(404).json({ success: false, error: 'Project not found.' });
+        }
+
+        const projectData = projectDoc.data();
+        const totalHours = await getAggregatedProjectHours(projectId);
+
+        // --- 2. Check Allocation ---
+        const allocatedHours = projectData.maxAllocatedHours || 0;
+        const additionalHours = projectData.additionalHours || 0;
+        const totalAllocation = allocatedHours + additionalHours;
+
+        if (totalHours + hours > totalAllocation && totalAllocation > 0) {
+            return res.status(200).json({
+                success: false,
+                exceedsAllocation: true,
+                totalHours: totalHours,
+                allocatedHours: totalAllocation,
+                exceededBy: (totalHours + hours) - totalAllocation
+            });
+        }
+
+        // --- 3. Add Timesheet Entry ---
+        const newEntry = {
+            projectId,
+            projectName: projectData.projectName,
+            projectCode: projectData.projectCode,
+            date: new Date(date),
+            hours: Number(hours),
+            description,
+            designerUid: uid,
+            designerName: name,
+            designerEmail: email,
+            status: 'approved', // Auto-approved if within budget
+            createdAt: FieldValue.serverTimestamp()
+        };
+
+        const docRef = await db.collection('timesheets').add(newEntry);
+
+        // --- 4. Update Project's hoursLogged (denormalized) ---
+        await updateProjectHoursLogged(projectId);
+
+        return res.status(201).json({ success: true, data: { id: docRef.id, ...newEntry } });
+
+    } catch (error) {
+        console.error('Error in POST /timesheets:', error);
+        return res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * DELETE /api/timesheets?id=...
+ * A designer deletes one of their own timesheet entries.
+ */
+timesheetsRouter.delete('/', async (req, res) => {
+    try {
+        const { id } = req.query;
+        const { uid } = req.user;
+
+        if (!id) {
+            return res.status(400).json({ success: false, error: 'Missing timesheet ID.' });
+        }
+
+        const docRef = db.collection('timesheets').doc(id);
+        const doc = await docRef.get();
+
+        if (!doc.exists) {
+            return res.status(404).json({ success: false, error: 'Timesheet entry not found.' });
+        }
+
+        const data = doc.data();
+
+        // Only allow designer to delete their own entry
+        if (data.designerUid !== uid) {
+            return res.status(403).json({ success: false, error: 'You are not authorized to delete this entry.' });
+        }
+
+        // Store projectId before deleting
+        const projectId = data.projectId;
+
+        // Delete the entry
+        await docRef.delete();
+
+        // Update the project's total logged hours
+        if (projectId) {
+            await updateProjectHoursLogged(projectId);
+        }
+
+        return res.status(200).json({ success: true, message: 'Timesheet entry deleted.' });
+
+    } catch (error) {
+        console.error('Error in DELETE /timesheets:', error);
+        return res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+
+// ============================================
+// TIME REQUESTS ROUTER (/api/time-requests)
+// ============================================
+
+/**
+ * GET /api/time-requests
+ * Handles:
+ * 1. ?status=pending (for COO/Director)
+ * 2. ?id=... (for COO/Director single view)
+ * 3. No query (for a designer getting their own requests)
+ */
+timeRequestRouter.get('/', async (req, res) => {
+    const { status, id } = req.query;
+    const { uid, role } = req.user;
+
+    try {
+        // 1. ================== COO: Get Pending Requests ==================
+        if (status === 'pending' && (role === 'coo' || role === 'director')) {
+            const requests = [];
+            const snapshot = await db.collection('time-requests')
+                .where('status', '==', 'pending')
+                .orderBy('createdAt', 'desc')
+                .get();
+            
+            snapshot.forEach(doc => requests.push({ id: doc.id, ...doc.data() }));
+            return res.status(200).json({ success: true, data: requests });
+        }
+
+        // 2. ================== COO: Get Single Request ==================
+        if (id && (role === 'coo' || role === 'director')) {
+            const doc = await db.collection('time-requests').doc(id).get();
+            if (!doc.exists) {
+                return res.status(404).json({ success: false, error: 'Request not found.' });
+            }
+            return res.status(200).json({ success: true, data: { id: doc.id, ...doc.data() } });
+        }
+
+        // 3. ================== Designer: Get My Requests ==================
+        const requests = [];
+        const snapshot = await db.collection('time-requests')
+            .where('designerUid', '==', uid)
+            .orderBy('createdAt', 'desc')
+            .get();
+            
+        snapshot.forEach(doc => requests.push({ id: doc.id, ...doc.data() }));
+        return res.status(200).json({ success: true, data: requests });
+
+    } catch (error) {
+        console.error('Error in GET /time-requests:', error);
+        return res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * POST /api/time-requests
+ * A designer requests additional hours for a project.
+ */
+timeRequestRouter.post('/', async (req, res) => {
+    try {
+        const { projectId, requestedHours, reason, pendingTimesheetData } = req.body;
+        const { uid, name, email } = req.user;
+
+        if (!projectId || !requestedHours || !reason) {
+            return res.status(400).json({ success: false, error: 'Missing required fields.' });
+        }
+
+        // Get project info
+        const projectDoc = await db.collection('projects').doc(projectId).get();
+        if (!projectDoc.exists) {
+            return res.status(404).json({ success: false, error: 'Project not found.' });
+        }
+        const projectData = projectDoc.data();
+        const currentHoursLogged = await getAggregatedProjectHours(projectId);
+
+        const newRequest = {
+            designerUid: uid,
+            designerName: name,
+            designerEmail: email,
+            projectId,
+            projectName: projectData.projectName,
+            projectCode: projectData.projectCode,
+            clientCompany: projectData.clientCompany,
+            designLeadName: projectData.designLeadName || null,
+            requestedHours: Number(requestedHours),
+            reason,
+            currentHoursLogged,
+            currentAllocatedHours: (projectData.maxAllocatedHours || 0) + (projectData.additionalHours || 0),
+            status: 'pending',
+            pendingTimesheetData: pendingTimesheetData || null,
+            createdAt: FieldValue.serverTimestamp()
+        };
+
+        const docRef = await db.collection('time-requests').add(newRequest);
+
+        return res.status(201).json({ success: true, data: { id: docRef.id } });
+
+    } catch (error) {
+        console.error('Error in POST /time-requests:', error);
+        return res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * PUT /api/time-requests?id=...
+ * COO/Director approves or rejects a time request.
+ */
+timeRequestRouter.put('/', async (req, res) => {
+    try {
+        const { id } = req.query;
+        const { action, approvedHours, comment, applyToTimesheet } = req.body;
+        const { uid, name } = req.user; // Reviewer
+
+        if (!id || !action) {
+            return res.status(400).json({ success: false, error: 'Missing request ID or action.' });
+        }
+
+        const requestRef = db.collection('time-requests').doc(id);
+        const requestDoc = await requestRef.get();
+
+        if (!requestDoc.exists) {
+            return res.status(404).json({ success: false, error: 'Time request not found.' });
+        }
+
+        const requestData = requestDoc.data();
+        const projectRef = db.collection('projects').doc(requestData.projectId);
+
+        const updateData = {
+            status: action === 'approve' ? 'approved' : (action === 'reject' ? 'rejected' : 'info_requested'),
+            reviewComment: comment || null,
+            reviewedBy: name,
+            reviewedByUid: uid,
+            reviewedAt: FieldValue.serverTimestamp()
+        };
+
+        if (action === 'approve') {
+            if (!approvedHours || approvedHours <= 0) {
+                return res.status(400).json({ success: false, error: 'Invalid approved hours.' });
+            }
+            updateData.approvedHours = Number(approvedHours);
+
+            // --- 1. Update Project's Additional Hours ---
+            await projectRef.update({
+                additionalHours: FieldValue.increment(Number(approvedHours))
+            });
+
+            // --- 2. If a timesheet was pending, add it now ---
+            if (applyToTimesheet && requestData.pendingTimesheetData) {
+                const tsData = requestData.pendingTimesheetData;
+                const newEntry = {
+                    ...tsData,
+                    date: new Date(tsData.date),
+                    hours: Number(tsData.hours),
+                    projectId: requestData.projectId,
+                    projectName: requestData.projectName,
+                    projectCode: requestData.projectCode,
+                    designerUid: requestData.designerUid,
+                    designerName: requestData.designerName,
+                    designerEmail: requestData.designerEmail,
+                    status: 'approved',
+                    relatedTimeRequestId: id,
+                    createdAt: FieldValue.serverTimestamp()
+                };
+                await db.collection('timesheets').add(newEntry);
+                // Trigger an update of the project's logged hours
+                await updateProjectHoursLogged(requestData.projectId);
+            }
+        }
+
+        // --- 3. Update the Time Request itself ---
+        await requestRef.update(updateData);
+
+        return res.status(200).json({ success: true, data: updateData });
+
+    } catch (error) {
+        console.error('Error in PUT /time-requests:', error);
+        return res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+
+// Export both routers
+module.exports = {
+    timesheetsRouter,
+    timeRequestRouter
 };
-
-module.exports = allowCors(handler);
-

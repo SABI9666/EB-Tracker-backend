@@ -67,6 +67,7 @@ const handler = async (req, res) => {
                 let projectsWithTimeline = 0;
                 let projectsAboveTimeline = 0;
                 let totalExceededHours = 0;
+                const projectStatusDistribution = {}; // <-- ADD THIS
 
                 for (const projectDoc of projectsSnapshot.docs) {
                     const project = { id: projectDoc.id, ...projectDoc.data() };
@@ -83,6 +84,15 @@ const handler = async (req, res) => {
                     const allocatedHours = project.allocatedHours || 0;
                     const isExceeded = hoursLogged > allocatedHours && allocatedHours > 0;
                     const exceededBy = isExceeded ? hoursLogged - allocatedHours : 0;
+                    
+                    // <-- ADD THIS BLOCK START -->
+                    const status = project.status || 'unknown';
+                    if (projectStatusDistribution[status]) {
+                        projectStatusDistribution[status]++;
+                    } else {
+                        projectStatusDistribution[status] = 1;
+                    }
+                    // <-- ADD THIS BLOCK END -->
                     
                     totalProjects++;
                     if (allocatedHours > 0) projectsWithTimeline++;
@@ -158,7 +168,8 @@ const handler = async (req, res) => {
                                 name: d.name,
                                 totalHours: d.totalHours,
                                 projectCount: d.projectsWorkedOn
-                            }))
+                            })),
+                            projectStatusDistribution // <-- ADD THIS
                         }
                     }
                 });
@@ -259,58 +270,31 @@ const handler = async (req, res) => {
             }, 0);
             
             const newTotal = totalHours + hours;
-            let requestUsed = null; // Will store ID of approved request if used
+            // let requestUsed = null; // This is old logic
             
             // ============================================
             // START: REPLACEMENT BLOCK
             // ============================================
-            // Check if exceeds allocated hours
+            
             const allocatedHours = project.allocatedHours || 0;
-            if (allocatedHours > 0 && newTotal > allocatedHours) {
-                // Check if designer has an approved time request for this project
-                const approvedRequestSnapshot = await db.collection('timeRequests')
-                    .where('projectId', '==', projectId)
-                    .where('designerUid', '==', req.user.uid)
-                    .where('status', '==', 'approved')
-                    .orderBy('createdAt', 'desc')
-                    .limit(1)
-                    .get();
-                                
-                let canProceed = false;
-                // requestUsed is already defined outside this block
-                                
-                if (!approvedRequestSnapshot.empty) {
-                    const approvedRequest = approvedRequestSnapshot.docs[0];
-                    const requestData = approvedRequest.data();
-                                        
-                    // Check if the approved hours cover this submission
-                    const newAllocatedHours = project.allocatedHours; // Already updated by approval
-                    if (newTotal <= newAllocatedHours) {
-                        canProceed = true;
-                        requestUsed = approvedRequest.id;
-                                                
-                        // Mark the request as used
-                        await approvedRequest.ref.update({
-                            status: 'used',
-                            usedAt: admin.firestore.FieldValue.serverTimestamp(),
-                            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-                        });
-                    }
-                }
-                                
-                if (!canProceed) {
-                    return res.status(400).json({ 
-                        success: false, 
-                        error: `Hours exceed allocation. Allocated: ${allocatedHours}h, Used: ${totalHours}h, Trying to add: ${hours}h`,
-                        exceedsAllocation: true,
-                        totalHours,
-                        allocatedHours,
-                        remainingHours: allocatedHours - totalHours,
-                        exceededBy: newTotal - allocatedHours,
-                        projectId,
-                        projectName: project.projectName
-                    });
-                }
+            const additionalHours = project.additionalHours || 0; // Get approved additional hours
+            const totalAllowedHours = allocatedHours + additionalHours;
+
+            // Check if exceeds allocated hours. If so, just return the error.
+            // The frontend will handle showing the "Request Time" modal.
+            if (totalAllowedHours > 0 && newTotal > totalAllowedHours) {
+                // If it exceeds, just return the error.
+                return res.status(400).json({ 
+                    success: false, 
+                    error: `Hours exceed total allocation. Allocated: ${allocatedHours}h, Additional: ${additionalHours}h, Used: ${totalHours}h, Trying to add: ${hours}h`,
+                    exceedsAllocation: true, // This is the key
+                    totalHours,
+                    allocatedHours: totalAllowedHours,
+                    remainingHours: totalAllowedHours - totalHours,
+                    exceededBy: newTotal - totalAllowedHours,
+                    projectId,
+                    projectName: project.projectName
+                });
             }
             // ============================================
             // END: REPLACEMENT BLOCK
@@ -330,8 +314,8 @@ const handler = async (req, res) => {
                 taskId: taskId || null,
                 status: 'submitted',
                 // Add these fields if time request was used
-                additionalTimeApproved: !!requestUsed,
-                additionalTimeRequestId: requestUsed || null,
+                additionalTimeApproved: newTotal > allocatedHours, // Mark if it used additional (previously approved) time
+                additionalTimeRequestId: null, // This is now linked from the request side
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
                 updatedAt: admin.firestore.FieldValue.serverTimestamp()
             };
@@ -359,7 +343,7 @@ const handler = async (req, res) => {
             
             // Notify Design Lead if hours are running low
             if (allocatedHours > 0) {
-                const percentUsed = (newTotal / allocatedHours) * 100;
+                const percentUsed = (newTotal / (project.allocatedHours || 0)) * 100; // Use original allocated hours for notification
                 if (percentUsed >= 80 && project.designLeadUid) {
                     await db.collection('notifications').add({
                         type: 'timesheet_warning',
@@ -382,8 +366,8 @@ const handler = async (req, res) => {
                 message: 'Timesheet entry created',
                 timesheetId: timesheetRef.id,
                 totalHours: newTotal,
-                allocatedHours: allocatedHours,
-                remainingHours: allocatedHours - newTotal
+                allocatedHours: totalAllowedHours,
+                remainingHours: totalAllowedHours - newTotal
             });
         }
 
@@ -512,3 +496,4 @@ const handler = async (req, res) => {
 };
 
 module.exports = allowCors(handler);
+

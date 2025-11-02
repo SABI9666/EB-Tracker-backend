@@ -1,5 +1,8 @@
 const express = require('express');
-const { db } = require('./_firebase-admin'); // Correct path to the file in the SAME directory
+// --- THIS IS THE FIX ---
+const { admin } = require('./_firebase-admin'); // Import admin
+const db = admin.firestore(); // Get the db instance from admin
+// --- END FIX ---
 const { FieldValue } = require('firebase-admin/firestore');
 
 const timesheetsRouter = express.Router();

@@ -154,29 +154,34 @@ try {
     const filesHandler = require('./api/files');
     const deliverablesHandler = require('./api/deliverables');
     const usersHandler = require('./api/users');
-    const timesheetsHandler = require('./api/timesheets');
-    const timeRequestsHandler = require('./api/time-requests'); // <-- NEW TIME REQUESTS API
     const variationsHandler = require('./api/variations');
     const emailHandler = require('./api/email');
 
+    // === UPDATED IMPORT ===
+    // Import both routers from the single 'timesheets.js' file
+    const { timesheetsRouter, timeRequestRouter } = require('./api/timesheets');
+
     console.log('✅ All handlers loaded successfully');
 
-    // Register routes - ORDER MATTERS for specific routes before general ones
-    app.all('/api/dashboard', dashboardHandler);
-    app.all('/api/proposals', proposalsHandler);
-    app.all('/api/projects', projectsHandler);
-    app.all('/api/tasks', tasksHandler);
-    app.all('/api/submissions', submissionsHandler);
-    app.all('/api/payments', paymentsHandler);
-    app.all('/api/notifications', notificationsHandler);
-    app.all('/api/activities', activitiesHandler);
-    app.all('/api/files', filesHandler);
-    app.all('/api/deliverables', deliverablesHandler);
-    app.all('/api/users', usersHandler);
-    app.all('/api/timesheets', timesheetsHandler);
-    app.all('/api/time-requests', timeRequestsHandler); // <-- NEW TIME REQUESTS API
-    app.all('/api/variations', variationsHandler);
+    // === UPDATED ROUTE REGISTRATION ===
+    // Register routes using app.use() to correctly mount Express routers
+    app.use('/api/dashboard', dashboardHandler);
+    app.use('/api/proposals', proposalsHandler);
+    app.use('/api/projects', projectsHandler);
+    app.use('/api/tasks', tasksHandler);
+    app.use('/api/submissions', submissionsHandler);
+    app.use('/api/payments', paymentsHandler);
+    app.use('/api/notifications', notificationsHandler);
+    app.use('/api/activities', activitiesHandler);
+    app.use('/api/files', filesHandler);
+    app.use('/api/deliverables', deliverablesHandler);
+    app.use('/api/users', usersHandler);
+    app.use('/api/variations', variationsHandler);
     app.use('/api/email', emailHandler);
+
+    // Mount the routers from the single timesheets.js file
+    app.use('/api/timesheets', timesheetsRouter);
+    app.use('/api/time-requests', timeRequestRouter);
 
     console.log('✅ All routes registered');
 

@@ -1,4 +1,4 @@
-// api/timesheets.js - Timesheet management for designers
+// api/timesheets.js - Timesheet management for designers with additional time requests
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
@@ -45,7 +45,124 @@ const handler = async (req, res) => {
         // GET - Retrieve timesheets
         // ============================================
         if (req.method === 'GET') {
-            const { projectId, designerUid, id } = req.query;
+            const { projectId, designerUid, id, action } = req.query;
+            
+            // Get executive dashboard analytics
+            if (action === 'executive_dashboard') {
+                if (!['coo', 'director'].includes(req.user.role)) {
+                    return res.status(403).json({ 
+                        success: false, 
+                        error: 'Only COO/Director can access executive dashboard' 
+                    });
+                }
+
+                // Get all projects with their timesheet data
+                const projectsSnapshot = await db.collection('projects')
+                    .where('status', 'in', ['assigned', 'in_progress', 'completed'])
+                    .get();
+                
+                const projects = [];
+                const designersMap = new Map();
+                let totalProjects = 0;
+                let projectsWithTimeline = 0;
+                let projectsAboveTimeline = 0;
+                let totalExceededHours = 0;
+
+                for (const projectDoc of projectsSnapshot.docs) {
+                    const project = { id: projectDoc.id, ...projectDoc.data() };
+                    
+                    // Get timesheets for this project
+                    const timesheetsSnapshot = await db.collection('timesheets')
+                        .where('projectId', '==', project.id)
+                        .get();
+                    
+                    const hoursLogged = timesheetsSnapshot.docs.reduce((sum, doc) => {
+                        return sum + (doc.data().hours || 0);
+                    }, 0);
+                    
+                    const allocatedHours = project.allocatedHours || 0;
+                    const isExceeded = hoursLogged > allocatedHours && allocatedHours > 0;
+                    const exceededBy = isExceeded ? hoursLogged - allocatedHours : 0;
+                    
+                    totalProjects++;
+                    if (allocatedHours > 0) projectsWithTimeline++;
+                    if (isExceeded) {
+                        projectsAboveTimeline++;
+                        totalExceededHours += exceededBy;
+                    }
+                    
+                    projects.push({
+                        id: project.id,
+                        projectName: project.projectName,
+                        projectCode: project.projectCode,
+                        clientCompany: project.clientCompany,
+                        allocatedHours: allocatedHours,
+                        hoursLogged: hoursLogged,
+                        percentageUsed: allocatedHours > 0 ? (hoursLogged / allocatedHours * 100).toFixed(1) : 0,
+                        isExceeded: isExceeded,
+                        exceededBy: exceededBy,
+                        status: project.status,
+                        designLeadName: project.designLeadName,
+                        assignedDesigners: project.assignedDesigners || []
+                    });
+                    
+                    // Collect designer data
+                    timesheetsSnapshot.docs.forEach(doc => {
+                        const timesheet = doc.data();
+                        if (!designersMap.has(timesheet.designerUid)) {
+                            designersMap.set(timesheet.designerUid, {
+                                uid: timesheet.designerUid,
+                                name: timesheet.designerName,
+                                email: timesheet.designerEmail,
+                                totalHours: 0,
+                                projectsWorkedOn: new Set()
+                            });
+                        }
+                        const designer = designersMap.get(timesheet.designerUid);
+                        designer.totalHours += timesheet.hours || 0;
+                        designer.projectsWorkedOn.add(project.id);
+                    });
+                }
+                
+                // Convert designers map to array
+                const designers = Array.from(designersMap.values()).map(d => ({
+                    ...d,
+                    projectsWorkedOn: d.projectsWorkedOn.size
+                }));
+                
+                // Calculate analytics
+                const exceededProjects = projects.filter(p => p.isExceeded);
+                const withinTimelineProjects = projects.filter(p => 
+                    !p.isExceeded && p.allocatedHours > 0 && p.hoursLogged > 0
+                );
+                
+                return res.status(200).json({
+                    success: true,
+                    data: {
+                        metrics: {
+                            totalProjects,
+                            projectsWithTimeline,
+                            projectsAboveTimeline,
+                            totalExceededHours: totalExceededHours.toFixed(1),
+                            averageHoursPerProject: totalProjects > 0 
+                                ? (projects.reduce((sum, p) => sum + p.hoursLogged, 0) / totalProjects).toFixed(1) 
+                                : 0
+                        },
+                        projects: projects.sort((a, b) => b.percentageUsed - a.percentageUsed),
+                        designers: designers.sort((a, b) => b.totalHours - a.totalHours),
+                        analytics: {
+                            exceededProjects,
+                            withinTimelineProjects,
+                            projectsAboveTimeline: exceededProjects,
+                            designerDuration: designers.map(d => ({
+                                name: d.name,
+                                totalHours: d.totalHours,
+                                projectCount: d.projectsWorkedOn
+                            }))
+                        }
+                    }
+                });
+            }
             
             // Get single timesheet entry
             if (id) {
@@ -149,9 +266,11 @@ const handler = async (req, res) => {
                 return res.status(400).json({ 
                     success: false, 
                     error: `Hours exceed allocation. Allocated: ${allocatedHours}h, Used: ${totalHours}h, Trying to add: ${hours}h`,
+                    exceedsAllocation: true,
                     totalHours,
                     allocatedHours,
-                    remainingHours: allocatedHours - totalHours
+                    remainingHours: allocatedHours - totalHours,
+                    exceededBy: newTotal - allocatedHours
                 });
             }
             

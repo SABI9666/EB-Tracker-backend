@@ -114,8 +114,9 @@ app.get('/', (req, res) => {
 // ============================================
 // APPLY AUTH MIDDLEWARE
 // ============================================
-// <<< MODIFIED: Apply your 'verifyToken' middleware to all '/api' routes
-app.use('/api', verifyToken);
+// ❌ COMMENTED OUT: Each handler already calls verifyToken internally
+// Applying auth globally here causes route conflicts and 404 errors
+// app.use('/api', verifyToken);
 
 
 // ============================================

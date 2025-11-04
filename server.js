@@ -185,8 +185,13 @@ try {
     app.use('/api/users', usersHandler);
     app.use('/api/variations', variationsHandler);
     app.use('/api/email', emailHandler);
-    app.use('/api/timesheets', timesheetsRouter);
-    app.use('/api/time-requests', timeRequestRouter);
+
+    // --- FIX: Add the verifyToken middleware ---
+    // This protects all routes defined in timesheetsRouter and timeRequestRouter
+    // and correctly populates req.user before they are called.
+    app.use('/api/timesheets', verifyToken, timesheetsRouter);
+    app.use('/api/time-requests', verifyToken, timeRequestRouter);
+    // --- End of Fix ---
 
     console.log('✅ All routes registered');
 

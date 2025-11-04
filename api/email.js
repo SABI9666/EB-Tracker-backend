@@ -19,6 +19,7 @@ const db = admin.firestore();
 
 const EMAIL_RECIPIENT_MAP = {
   'proposal.created': ['estimator', 'Estimator', 'COO', 'director', 'Director'], // + BDM who created it
+  'project.submitted': ['estimator', 'Estimator', 'COO', 'director', 'Director'], // + BDM who submitted it (alias for proposal.created)
   'project.approved_by_director': ['bdm', 'BDM'], // BDM who created the project
   'proposal.uploaded': ['estimator', 'Estimator'],
   'estimation.complete': ['COO'],
@@ -83,6 +84,69 @@ const EMAIL_TEMPLATE_MAP = {
             
             <center>
               <a href="{{dashboardUrl}}" class="cta-button">View Proposal Details</a>
+            </center>
+          </div>
+          <div class="footer">
+            <p><strong>EB-Tracker</strong> | Project Management System</p>
+            <p>This is an automated notification. Please do not reply to this email.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `
+  },
+
+  'project.submitted': {
+    subject: '🎯 New Project Submitted: {{projectName}}',
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+          body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f4f4f4; }
+          .container { max-width: 600px; margin: 20px auto; background: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+          .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px 20px; text-align: center; }
+          .header h1 { margin: 0; font-size: 24px; font-weight: 600; }
+          .content { padding: 30px 20px; }
+          .content h2 { color: #667eea; font-size: 20px; margin-top: 0; }
+          .info-box { background: #f8f9fa; border-left: 4px solid #667eea; padding: 15px; margin: 20px 0; border-radius: 4px; }
+          .info-box p { margin: 8px 0; }
+          .info-box strong { color: #333; }
+          .cta-button { display: inline-block; background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; margin: 20px 0; font-weight: 600; }
+          .cta-button:hover { background: #5568d3; }
+          .footer { background: #f8f9fa; padding: 20px; text-align: center; font-size: 12px; color: #666; }
+          .footer p { margin: 5px 0; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>🎯 New Project Submitted</h1>
+          </div>
+          <div class="content">
+            <h2>Project Submission Notification</h2>
+            <p>Dear Team,</p>
+            <p>A new project has been successfully submitted and requires your attention.</p>
+            
+            <div class="info-box">
+              <p><strong>Project Name:</strong> {{projectName}}</p>
+              <p><strong>Submitted By:</strong> {{createdBy}}</p>
+              <p><strong>Date:</strong> {{date}}</p>
+              {{#if description}}<p><strong>Description:</strong> {{description}}</p>{{/if}}
+              {{#if clientName}}<p><strong>Client:</strong> {{clientName}}</p>{{/if}}
+            </div>
+            
+            <p><strong>Next Steps:</strong></p>
+            <ul>
+              <li><strong>Estimator:</strong> Please review and prepare estimation</li>
+              <li><strong>COO:</strong> Monitor project progress</li>
+              <li><strong>Director:</strong> Await estimation for review</li>
+            </ul>
+            
+            <center>
+              <a href="{{dashboardUrl}}" class="cta-button">View Project Details</a>
             </center>
           </div>
           <div class="footer">
@@ -867,8 +931,8 @@ router.post('/trigger', async (req, res) => {
 
     // --- SPECIAL CASES ---
     
-    // 1. Proposal created - add BDM who created it
-    if (event === 'proposal.created') {
+    // 1. Proposal/Project created - add BDM who created it
+    if (event === 'proposal.created' || event === 'project.submitted') {
       if (data && data.createdByEmail) {
         recipientEmails.push(data.createdByEmail);
       } else if (data && data.projectId) {
@@ -923,7 +987,7 @@ router.post('/trigger', async (req, res) => {
     // Prepare email content
     const subject = interpolate(template.subject, { ...data, event });
     const htmlContent = interpolate(template.html, { ...data, event });
-    const fromEmail = process.env.YOUR_VERIFIED_DOMAIN_EMAIL || 'sabin@edanbrook.com';
+    const fromEmail = process.env.YOUR_VERIFIED_DOMAIN_EMAIL || 'notifications@ebtracker.com';
 
     // Send email via Resend
     const { data: sendData, error: sendError } = await resend.emails.send({

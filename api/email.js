@@ -7,8 +7,6 @@ const router = express.Router();
 const resend = new Resend(process.env.RESEND_API_KEY);
 const db = admin.firestore();
 
-const db = admin.firestore();
-
 // --- 1. Event to Role Map (Who to email) ---
 // NOTE: Some events require additional data to identify specific recipients:
 // - proposal.created: requires data.createdByEmail (BDM who created the proposal)

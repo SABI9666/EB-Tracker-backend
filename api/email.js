@@ -3,18 +3,12 @@ const express = require('express');
 const { Resend } = require('resend');
 const admin = require('./_firebase-admin');
 
-const router = express.Router();
+// Note: No 'router' here, we export the router and the function at the end
+const emailRouter = express.Router();
 const resend = new Resend(process.env.RESEND_API_KEY);
 const db = admin.firestore();
 
 // --- 1. Event to Role Map (Who to email) ---
-// NOTE: Some events require additional data to identify specific recipients:
-// - proposal.created: requires data.createdByEmail (BDM who created the proposal)
-// - project.approved_by_director: requires data.projectId (to find the project BDM)
-// - designer.allocated: requires data.designerEmail (specific designer)
-// - variation.allocated/approved: requires data.projectId (to find project BDM)
-// - invoice.saved: requires data.projectId (to find project BDM)
-
 const EMAIL_RECIPIENT_MAP = {
   'proposal.created': ['estimator', 'Estimator', 'COO', 'director', 'Director'], // + BDM who created it
   'project.submitted': ['estimator', 'Estimator', 'COO', 'director', 'Director'], // + BDM who submitted it (alias for proposal.created)
@@ -909,8 +903,138 @@ function interpolate(template, data) {
   return result;
 }
 
-// --- THE API ENDPOINT ---
-router.post('/trigger', async (req, res) => {
+// --- THIS IS THE NEW EXPORTABLE FUNCTION ---
+async function sendEmailNotification(event, data) {
+  if (!event) {
+    throw new Error('Event name is required.');
+  }
+
+  console.log(`Processing event: ${event}`);
+
+  // Get roles and template
+  const rolesToNotify = EMAIL_RECIPIENT_MAP[event] || [];
+  const template = EMAIL_TEMPLATE_MAP[event] || EMAIL_TEMPLATE_MAP['default'];
+
+  // Get email addresses from Firestore based on roles
+  let recipientEmails = await getEmailsForRoles(rolesToNotify);
+  console.log('📋 Initial recipients from roles:', recipientEmails);
+  console.log('📦 Received data:', JSON.stringify(data, null, 2));
+
+  // --- SPECIAL CASES ---
+  
+  // 1. Proposal/Project created - add BDM who created it
+  if (event === 'proposal.created' || event === 'project.submitted') {
+    console.log('🔍 Processing BDM email for project submission...');
+    console.log('🔑 data.createdByEmail =', data?.createdByEmail);
+    
+    if (data && data.createdByEmail) {
+      console.log('✅ Found createdByEmail, adding to recipients:', data.createdByEmail);
+      recipientEmails.push(data.createdByEmail);
+    } else {
+      console.log('❌ No createdByEmail provided in data');
+      
+      if (data && data.projectId) {
+        console.log('🔍 Attempting to fetch BDM from projectId:', data.projectId);
+        // Fallback: try to get BDM from project document
+        const bdmEmail = await getBDMEmailForProject(data.projectId);
+        if (bdmEmail) {
+          console.log('✅ Found BDM email from project document:', bdmEmail);
+          recipientEmails.push(bdmEmail);
+        } else {
+          console.log('❌ Could not find BDM email from project document');
+        }
+      } else {
+        console.log('⚠️ No projectId provided either - cannot fetch BDM email');
+      }
+    }
+  }
+
+  // 2. Project approved - send to BDM who created the project
+  // --- THIS IS THE UPDATED BLOCK ---
+  if (event === 'project.approved_by_director') {
+    let bdmEmail = null;
+    if (data && data.createdByEmail) {
+      // Priority 1: Use the email provided in the data payload
+      console.log('✅ Found createdByEmail in payload for approval:', data.createdByEmail);
+      bdmEmail = data.createdByEmail;
+    } else if (data && data.projectId) {
+      // Priority 2: Fallback to finding BDM from the project ID
+      console.log('🔍 No createdByEmail, checking projectId:', data.projectId);
+      bdmEmail = await getBDMEmailForProject(data.projectId);
+    }
+    
+    if (bdmEmail) {
+      recipientEmails = [bdmEmail]; // Only send to this specific BDM
+    } else {
+      console.warn(`No BDM email found for project.approved_by_director. Data:`, data);
+    }
+  }
+  // --- END OF UPDATED BLOCK ---
+
+  // 3. Designer allocated - send to specific designer
+  if (event === 'designer.allocated' && data && data.designerEmail) {
+    recipientEmails.push(data.designerEmail);
+  }
+
+  // 4. Variation allocated/approved - add project BDM
+  if ((event === 'variation.allocated' || event === 'variation.approved') && data && data.projectId) {
+    const projectBDMEmail = await getBDMEmailForProject(data.projectId);
+    if (projectBDMEmail) {
+      recipientEmails.push(projectBDMEmail);
+    }
+  }
+
+  // 5. Invoice saved - add project BDM
+  if (event === 'invoice.saved' && data && data.projectId) {
+    const projectBDMEmail = await getBDMEmailForProject(data.projectId);
+    if (projectBDMEmail) {
+      recipientEmails.push(projectBDMEmail);
+    }
+  }
+
+  // Remove duplicates
+  const uniqueEmails = [...new Set(recipientEmails)];
+  console.log('📧 Final unique recipients:', uniqueEmails);
+  console.log('📊 Recipient count:', uniqueEmails.length);
+  
+  if (uniqueEmails.length === 0) {
+    console.log(`No recipients found for event: ${event}`);
+    return { 
+      message: 'Event processed, but no email recipients found.',
+      event: event 
+    };
+  }
+
+  // Prepare email content
+  const subject = interpolate(template.subject, { ...data, event });
+  const htmlContent = interpolate(template.html, { ...data, event });
+  const fromEmail = process.env.YOUR_VERIFIED_DOMAIN_EMAIL || 'notifications@ebtracker.com';
+
+  // Send email via Resend
+  const { data: sendData, error: sendError } = await resend.emails.send({
+    from: `EB-Tracker <${fromEmail}>`,
+    to: uniqueEmails,
+    subject: subject,
+    html: htmlContent,
+  });
+
+  if (sendError) {
+    console.error('Resend Error:', sendError);
+    throw new Error(`Failed to send email: ${sendError.message}`);
+  }
+
+  console.log(`Email sent successfully for event: ${event}`);
+  return { 
+    event: event,
+    recipientCount: uniqueEmails.length,
+    sendId: sendData.id 
+  };
+}
+// --- END OF NEW EXPORTABLE FUNCTION ---
+
+
+// --- THE API ENDPOINT (Now simplified) ---
+emailRouter.post('/trigger', async (req, res) => {
   try {
     const { event, data } = req.body;
 
@@ -918,129 +1042,12 @@ router.post('/trigger', async (req, res) => {
       return res.status(400).json({ error: 'Event name is required.' });
     }
 
-    console.log(`Processing event: ${event}`);
+    // Call the new, reusable function
+    const result = await sendEmailNotification(event, data);
 
-    // Get roles and template
-    const rolesToNotify = EMAIL_RECIPIENT_MAP[event] || [];
-    const template = EMAIL_TEMPLATE_MAP[event] || EMAIL_TEMPLATE_MAP['default'];
-
-    // Get email addresses from Firestore based on roles
-    let recipientEmails = await getEmailsForRoles(rolesToNotify);
-    console.log('📋 Initial recipients from roles:', recipientEmails);
-    console.log('📦 Received data:', JSON.stringify(data, null, 2));
-
-    // --- SPECIAL CASES ---
-    
-    // 1. Proposal/Project created - add BDM who created it
-    if (event === 'proposal.created' || event === 'project.submitted') {
-      console.log('🔍 Processing BDM email for project submission...');
-      console.log('🔑 data.createdByEmail =', data?.createdByEmail);
-      
-      if (data && data.createdByEmail) {
-        console.log('✅ Found createdByEmail, adding to recipients:', data.createdByEmail);
-        recipientEmails.push(data.createdByEmail);
-      } else {
-        console.log('❌ No createdByEmail provided in data');
-        
-        if (data && data.projectId) {
-          console.log('🔍 Attempting to fetch BDM from projectId:', data.projectId);
-          // Fallback: try to get BDM from project document
-          const bdmEmail = await getBDMEmailForProject(data.projectId);
-          if (bdmEmail) {
-            console.log('✅ Found BDM email from project document:', bdmEmail);
-            recipientEmails.push(bdmEmail);
-          } else {
-            console.log('❌ Could not find BDM email from project document');
-          }
-        } else {
-          console.log('⚠️ No projectId provided either - cannot fetch BDM email');
-        }
-      }
-    }
-
-    // 2. Project approved - send to BDM who created the project
-    // --- THIS IS THE UPDATED BLOCK ---
-    if (event === 'project.approved_by_director') {
-      let bdmEmail = null;
-      if (data && data.createdByEmail) {
-        // Priority 1: Use the email provided in the data payload
-        console.log('✅ Found createdByEmail in payload for approval:', data.createdByEmail);
-        bdmEmail = data.createdByEmail;
-      } else if (data && data.projectId) {
-        // Priority 2: Fallback to finding BDM from the project ID
-        console.log('🔍 No createdByEmail, checking projectId:', data.projectId);
-        bdmEmail = await getBDMEmailForProject(data.projectId);
-      }
-      
-      if (bdmEmail) {
-        recipientEmails = [bdmEmail]; // Only send to this specific BDM
-      } else {
-        console.warn(`No BDM email found for project.approved_by_director. Data:`, data);
-      }
-    }
-    // --- END OF UPDATED BLOCK ---
-
-    // 3. Designer allocated - send to specific designer
-    if (event === 'designer.allocated' && data && data.designerEmail) {
-      recipientEmails.push(data.designerEmail);
-    }
-
-    // 4. Variation allocated/approved - add project BDM
-    if ((event === 'variation.allocated' || event === 'variation.approved') && data && data.projectId) {
-      const projectBDMEmail = await getBDMEmailForProject(data.projectId);
-      if (projectBDMEmail) {
-        recipientEmails.push(projectBDMEmail);
-      }
-    }
-
-    // 5. Invoice saved - add project BDM
-    if (event === 'invoice.saved' && data && data.projectId) {
-      const projectBDMEmail = await getBDMEmailForProject(data.projectId);
-      if (projectBDMEmail) {
-        recipientEmails.push(projectBDMEmail);
-      }
-    }
-
-    // Remove duplicates
-    const uniqueEmails = [...new Set(recipientEmails)];
-    console.log('📧 Final unique recipients:', uniqueEmails);
-    console.log('📊 Recipient count:', uniqueEmails.length);
-    
-    if (uniqueEmails.length === 0) {
-      console.log(`No recipients found for event: ${event}`);
-      return res.status(200).json({ 
-        message: 'Event processed, but no email recipients found.',
-        event: event 
-      });
-    }
-
-    // Prepare email content
-    const subject = interpolate(template.subject, { ...data, event });
-    const htmlContent = interpolate(template.html, { ...data, event });
-    const fromEmail = process.env.YOUR_VERIFIED_DOMAIN_EMAIL || 'notifications@ebtracker.com';
-
-    // Send email via Resend
-    const { data: sendData, error: sendError } = await resend.emails.send({
-      from: `EB-Tracker <${fromEmail}>`,
-      to: uniqueEmails,
-      subject: subject,
-      html: htmlContent,
-    });
-
-    if (sendError) {
-      console.error('Resend Error:', sendError);
-      return res.status(500).json({ 
-        error: 'Failed to send email.',
-        details: sendError 
-      });
-    }
-
-    console.log(`Email sent successfully for event: ${event}`);
     res.status(200).json({ 
       message: 'Email(s) sent successfully.',
-      event: event,
-      recipientCount: uniqueEmails.length,
-      sendId: sendData.id 
+      ...result
     });
 
   } catch (error) {
@@ -1053,7 +1060,7 @@ router.post('/trigger', async (req, res) => {
 });
 
 // Test endpoint
-router.get('/', (req, res) => {
+emailRouter.get('/', (req, res) => {
   res.status(200).json({ 
     message: 'Email API is active.',
     availableEvents: Object.keys(EMAIL_RECIPIENT_MAP),
@@ -1062,7 +1069,7 @@ router.get('/', (req, res) => {
 });
 
 // Health check
-router.get('/health', (req, res) => {
+emailRouter.get('/health', (req, res) => {
   res.status(200).json({ 
     status: 'healthy',
     service: 'Email API',
@@ -1070,4 +1077,8 @@ router.get('/health', (req, res) => {
   });
 });
 
-module.exports = router;
+// --- EXPORT BOTH THE ROUTER AND THE NEW FUNCTION ---
+module.exports = {
+  emailHandler: emailRouter, // Keep original export name for server.js
+  sendEmailNotification     // Export the new function
+};

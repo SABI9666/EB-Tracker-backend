@@ -959,12 +959,26 @@ router.post('/trigger', async (req, res) => {
     }
 
     // 2. Project approved - send to BDM who created the project
-    if (event === 'project.approved_by_director' && data && data.projectId) {
-      const bdmEmail = await getBDMEmailForProject(data.projectId);
+    // --- THIS IS THE UPDATED BLOCK ---
+    if (event === 'project.approved_by_director') {
+      let bdmEmail = null;
+      if (data && data.createdByEmail) {
+        // Priority 1: Use the email provided in the data payload
+        console.log('✅ Found createdByEmail in payload for approval:', data.createdByEmail);
+        bdmEmail = data.createdByEmail;
+      } else if (data && data.projectId) {
+        // Priority 2: Fallback to finding BDM from the project ID
+        console.log('🔍 No createdByEmail, checking projectId:', data.projectId);
+        bdmEmail = await getBDMEmailForProject(data.projectId);
+      }
+      
       if (bdmEmail) {
-        recipientEmails = [bdmEmail]; // Only send to the project BDM
+        recipientEmails = [bdmEmail]; // Only send to this specific BDM
+      } else {
+        console.warn(`No BDM email found for project.approved_by_director. Data:`, data);
       }
     }
+    // --- END OF UPDATED BLOCK ---
 
     // 3. Designer allocated - send to specific designer
     if (event === 'designer.allocated' && data && data.designerEmail) {

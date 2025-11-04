@@ -10,6 +10,13 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const db = admin.firestore();
 
 // --- 1. Event to Role Map (Who to email) ---
+// NOTE: Some events require additional data to identify specific recipients:
+// - proposal.created: requires data.createdByEmail (BDM who created the proposal)
+// - project.approved_by_director: requires data.projectId (to find the project BDM)
+// - designer.allocated: requires data.designerEmail (specific designer)
+// - variation.allocated/approved: requires data.projectId (to find project BDM)
+// - invoice.saved: requires data.projectId (to find project BDM)
+
 const EMAIL_RECIPIENT_MAP = {
   'proposal.created': ['estimator', 'Estimator', 'COO', 'director', 'Director'], // + BDM who created it
   'project.approved_by_director': ['bdm', 'BDM'], // BDM who created the project
@@ -861,8 +868,16 @@ router.post('/trigger', async (req, res) => {
     // --- SPECIAL CASES ---
     
     // 1. Proposal created - add BDM who created it
-    if (event === 'proposal.created' && data && data.createdByEmail) {
-      recipientEmails.push(data.createdByEmail);
+    if (event === 'proposal.created') {
+      if (data && data.createdByEmail) {
+        recipientEmails.push(data.createdByEmail);
+      } else if (data && data.projectId) {
+        // Fallback: try to get BDM from project document
+        const bdmEmail = await getBDMEmailForProject(data.projectId);
+        if (bdmEmail) {
+          recipientEmails.push(bdmEmail);
+        }
+      }
     }
 
     // 2. Project approved - send to BDM who created the project

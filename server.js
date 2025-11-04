@@ -163,7 +163,8 @@ try {
     const variationsHandler = require('./api/variations');
     
     console.log('  Loading email...');
-    const emailHandler = require('./api/email');
+    // --- FIX: Import the 'emailHandler' object from the refactored file ---
+    const { emailHandler } = require('./api/email');
     
     console.log('  Loading timesheets...');
     const { timesheetsRouter, timeRequestRouter } = require('./api/timesheets');
@@ -264,3 +265,4 @@ process.on('SIGINT', () => {
 });
 
 module.exports = app;
+

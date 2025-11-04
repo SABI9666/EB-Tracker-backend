@@ -705,6 +705,52 @@ const handler = async (req, res) => {
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         isRead: false
                     });
+
+                    // --- 📧 TRIGGER EMAIL NOTIFICATION TO BDM ---
+                    try {
+                        const bdmUid = proposal.createdByUid;
+                        if (!bdmUid) throw new Error('Proposal creator UID not found.');
+                        
+                        const bdmUserDoc = await db.collection('users').doc(bdmUid).get();
+                        if (!bdmUserDoc.exists) throw new Error(`BDM user doc ${bdmUid} not found.`);
+                        
+                        const bdmEmail = bdmUserDoc.data().email;
+                        if (!bdmEmail) throw new Error(`BDM email not found for user ${bdmUid}.`);
+
+                        const emailPayload = {
+                            event: 'project.approved_by_director', // Use the correct event
+                            data: {
+                                projectName: proposal.projectName,
+                                approvedBy: req.user.name, // The Director
+                                date: new Date().toLocaleDateString('en-US', {
+                                    year: 'numeric',
+                                    month: 'long',
+                                    day: 'numeric'
+                                }),
+                                estimatedValue: `${proposal.pricing?.currency || ''} ${proposal.pricing?.quoteValue || 'N/A'}`,
+                                createdByEmail: bdmEmail // Pass the BDM's email directly
+                            }
+                        };
+                        
+                        console.log('📤 Triggering \'project.approved_by_director\' email to:', bdmEmail);
+                        
+                        // We don't need to await this, let it run in the background
+                        axios.post(
+                            `${process.env.API_URL || 'http://localhost:5000'}/api/email/trigger`,
+                            emailPayload,
+                            { headers: { 'Content-Type': 'application/json' }, timeout: 10000 }
+                        ).then(response => {
+                            console.log('✅ Approval email API response:', response.data);
+                        }).catch(emailError => {
+                            console.error('❌ Approval email notification failed:', emailError.response?.data || emailError.message);
+                        });
+
+                    } catch (emailTriggerError) {
+                        console.error('❌ Failed to prepare approval email:', emailTriggerError.message);
+                        // Do not fail the whole request
+                    }
+                    // --- END OF EMAIL TRIGGER ---
+
                     break;
 
                 case 'reject_proposal':

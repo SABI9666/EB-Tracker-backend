@@ -186,12 +186,12 @@ try {
     app.use('/api/variations', variationsHandler);
     app.use('/api/email', emailHandler);
 
-    // --- FIX: Add the verifyToken middleware ---
-    // This protects all routes defined in timesheetsRouter and timeRequestRouter
-    // and correctly populates req.user before they are called.
-    app.use('/api/timesheets', verifyToken, timesheetsRouter);
-    app.use('/api/time-requests', verifyToken, timeRequestRouter);
-    // --- End of Fix ---
+    // --- REVERTED FIX ---
+    // The verifyToken middleware is now called inside timesheets.js
+    // to match the pattern used in proposals.js
+    app.use('/api/timesheets', timesheetsRouter);
+    app.use('/api/time-requests', timeRequestRouter);
+    // --- End of Revert ---
 
     console.log('✅ All routes registered');
 

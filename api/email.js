@@ -1,12 +1,12 @@
-/ File: /api/email.js
-// Enhanced Email API with Professional Templates
-
+// api/email.js - Email notification API
 const express = require('express');
 const { Resend } = require('resend');
 const admin = require('./_firebase-admin');
 
 const router = express.Router();
 const resend = new Resend(process.env.RESEND_API_KEY);
+const db = admin.firestore();
+
 const db = admin.firestore();
 
 // --- 1. Event to Role Map (Who to email) ---

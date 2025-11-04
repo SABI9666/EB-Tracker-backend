@@ -125,25 +125,53 @@ app.get('/', (req, res) => {
 console.log('📦 Loading API routes...');
 
 try {
-    // Load all route handlers
+    // Load all route handlers with individual error catching
+    console.log('  Loading dashboard...');
     const dashboardHandler = require('./api/dashboard');
+    
+    console.log('  Loading proposals...');
     const proposalsHandler = require('./api/proposals');
+    
+    console.log('  Loading projects...');
     const projectsHandler = require('./api/projects');
+    
+    console.log('  Loading tasks...');
     const tasksHandler = require('./api/tasks');
+    
+    console.log('  Loading submissions...');
     const submissionsHandler = require('./api/submissions');
+    
+    console.log('  Loading payments...');
     const paymentsHandler = require('./api/payments');
+    
+    console.log('  Loading notifications...');
     const notificationsHandler = require('./api/notifications');
+    
+    console.log('  Loading activities...');
     const activitiesHandler = require('./api/activities');
+    
+    console.log('  Loading files...');
     const filesHandler = require('./api/files');
+    
+    console.log('  Loading deliverables...');
     const deliverablesHandler = require('./api/deliverables');
+    
+    console.log('  Loading users...');
     const usersHandler = require('./api/users');
+    
+    console.log('  Loading variations...');
     const variationsHandler = require('./api/variations');
+    
+    console.log('  Loading email...');
     const emailHandler = require('./api/email');
+    
+    console.log('  Loading timesheets...');
     const { timesheetsRouter, timeRequestRouter } = require('./api/timesheets');
 
     console.log('✅ All handlers loaded successfully');
 
     // Register routes
+    console.log('📝 Registering routes...');
     app.use('/api/dashboard', dashboardHandler);
     app.use('/api/proposals', proposalsHandler);
     app.use('/api/projects', projectsHandler);
@@ -163,8 +191,9 @@ try {
     console.log('✅ All routes registered');
 
 } catch (error) {
-    console.error('❌ Error loading routes:', error);
-    console.error('Stack:', error.stack);
+    console.error('❌ Error loading routes:', error.message);
+    console.error('❌ Stack:', error.stack);
+    console.error('❌ CRITICAL: Routes not loaded! Server will have 404 errors.');
 }
 
 // ============================================

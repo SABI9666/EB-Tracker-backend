@@ -2,7 +2,8 @@
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
-const axios = require('axios'); // ⚠️ ADDED: For email API calls
+// --- FIX: Import the new email function, remove axios ---
+const { sendEmailNotification } = require('./email');
 
 
 const db = admin.firestore();
@@ -717,33 +718,30 @@ const handler = async (req, res) => {
                         const bdmEmail = bdmUserDoc.data().email;
                         if (!bdmEmail) throw new Error(`BDM email not found for user ${bdmUid}.`);
 
-                        const emailPayload = {
-                            event: 'project.approved_by_director', // Use the correct event
-                            data: {
-                                projectName: proposal.projectName,
-                                approvedBy: req.user.name, // The Director
-                                date: new Date().toLocaleDateString('en-US', {
-                                    year: 'numeric',
-                                    month: 'long',
-                                    day: 'numeric'
-                                }),
-                                estimatedValue: `${proposal.pricing?.currency || ''} ${proposal.pricing?.quoteValue || 'N/A'}`,
-                                createdByEmail: bdmEmail // Pass the BDM's email directly
-                            }
+                        // This is the data object the email template needs
+                        const emailData = {
+                            projectName: proposal.projectName,
+                            approvedBy: req.user.name, // The Director
+                            date: new Date().toLocaleDateString('en-US', {
+                                year: 'numeric',
+                                month: 'long',
+                                day: 'numeric'
+                            }),
+                            estimatedValue: `${proposal.pricing?.currency || ''} ${proposal.pricing?.quoteValue || 'N/A'}`,
+                            createdByEmail: bdmEmail // Pass the BDM's email directly
                         };
                         
                         console.log('📤 Triggering \'project.approved_by_director\' email to:', bdmEmail);
                         
-                        // We don't need to await this, let it run in the background
-                        axios.post(
-                            `${process.env.API_URL || 'http://localhost:5000'}/api/email/trigger`,
-                            emailPayload,
-                            { headers: { 'Content-Type': 'application/json' }, timeout: 10000 }
-                        ).then(response => {
-                            console.log('✅ Approval email API response:', response.data);
-                        }).catch(emailError => {
-                            console.error('❌ Approval email notification failed:', emailError.response?.data || emailError.message);
-                        });
+                        // Direct function call, no HTTP, no localhost, no port 5000
+                        // We don't await, let it run in the background
+                        sendEmailNotification('project.approved_by_director', emailData)
+                            .then(result => {
+                                console.log('✅ Approval email sent:', result);
+                            })
+                            .catch(emailError => {
+                                console.error('❌ Approval email notification failed:', emailError.message);
+                            });
 
                     } catch (emailTriggerError) {
                         console.error('❌ Failed to prepare approval email:', emailTriggerError.message);

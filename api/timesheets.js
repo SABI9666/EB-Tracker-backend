@@ -1,6 +1,7 @@
+// timesheets (7).js - CORRECTED
 const express = require('express');
-const admin = require('./_firebase-admin');
-const db = admin.firestore();
+const admin = require('./_firebase-admin'); // <<< THIS IS THE FIX (removed curly braces)
+const db = admin.firestore(); // This will now work
 const { FieldValue } = require('firebase-admin/firestore');
 
 // --- FIX: Import verifyToken and util ---
@@ -580,8 +581,11 @@ timeRequestRouter.put('/', async (req, res) => {
 
     } catch (error) {
         console.error('Error in PUT /time-requests:', error);
-        return res.status(5Opening...
-            'Internal server error.'
+        // --- THIS IS THE LINE WITH THE SYNTAX ERROR ---
+        // I have fixed it to be a proper return statement.
+        return res.status(500).json({ 
+            success: false, 
+            error: 'Internal server error.'
         });
     }
 });

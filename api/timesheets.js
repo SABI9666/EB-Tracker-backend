@@ -1,7 +1,12 @@
 const express = require('express');
-const admin = require('./_firebase-admin'); // <<< THIS IS THE FIX (removed curly braces)
-const db = admin.firestore(); // This will now work
+const admin = require('./_firebase-admin');
+const db = admin.firestore();
 const { FieldValue } = require('firebase-admin/firestore');
+
+// --- FIX: Import verifyToken and util ---
+const { verifyToken } = require('../middleware/auth');
+const util = require('util');
+// --- End of Fix ---
 
 const timesheetsRouter = express.Router();
 const timeRequestRouter = express.Router();
@@ -68,6 +73,16 @@ const updateProjectHoursLogged = async (projectId) => {
  * 3. No query (for a designer getting their own timesheets)
  */
 timesheetsRouter.get('/', async (req, res) => {
+    
+    // --- FIX: Add internal auth check ---
+    try {
+        await util.promisify(verifyToken)(req, res);
+    } catch (error) {
+        console.error("Auth error in GET /api/timesheets:", error);
+        return res.status(401).json({ success: false, error: 'Authentication failed', message: error.message });
+    }
+    // --- End of Fix ---
+
     const { action, projectId } = req.query;
     const designerUid = req.user.uid; // From auth middleware
 
@@ -233,6 +248,16 @@ timesheetsRouter.get('/', async (req, res) => {
  * A designer logs new hours.
  */
 timesheetsRouter.post('/', async (req, res) => {
+    
+    // --- FIX: Add internal auth check ---
+    try {
+        await util.promisify(verifyToken)(req, res);
+    } catch (error) {
+        console.error("Auth error in POST /api/timesheets:", error);
+        return res.status(401).json({ success: false, error: 'Authentication failed', message: error.message });
+    }
+    // --- End of Fix ---
+
     try {
         const { projectId, date, hours, description } = req.body;
         const { uid, name, email } = req.user;
@@ -298,6 +323,16 @@ timesheetsRouter.post('/', async (req, res) => {
  * A designer deletes one of their own timesheet entries.
  */
 timesheetsRouter.delete('/', async (req, res) => {
+    
+    // --- FIX: Add internal auth check ---
+    try {
+        await util.promisify(verifyToken)(req, res);
+    } catch (error) {
+        console.error("Auth error in DELETE /api/timesheets:", error);
+        return res.status(401).json({ success: false, error: 'Authentication failed', message: error.message });
+    }
+    // --- End of Fix ---
+
     try {
         const { id } = req.query;
         const { uid } = req.user;
@@ -352,8 +387,18 @@ timesheetsRouter.delete('/', async (req, res) => {
  * 3. No query (for a designer getting their own requests)
  */
 timeRequestRouter.get('/', async (req, res) => {
+
+    // --- FIX: Add internal auth check ---
+    try {
+        await util.promisify(verifyToken)(req, res);
+    } catch (error) {
+        console.error("Auth error in GET /api/time-requests:", error);
+        return res.status(401).json({ success: false, error: 'Authentication failed', message: error.message });
+    }
+    // --- End of Fix ---
+
     const { status, id } = req.query;
-    const { uid, role } = req.user;
+    const { uid, role } = req.user; // This will now work
 
     try {
         // 1. ================== COO: Get Pending Requests ==================
@@ -398,6 +443,16 @@ timeRequestRouter.get('/', async (req, res) => {
  * A designer requests additional hours for a project.
  */
 timeRequestRouter.post('/', async (req, res) => {
+    
+    // --- FIX: Add internal auth check ---
+    try {
+        await util.promisify(verifyToken)(req, res);
+    } catch (error) {
+        console.error("Auth error in POST /api/time-requests:", error);
+        return res.status(401).json({ success: false, error: 'Authentication failed', message: error.message });
+    }
+    // --- End of Fix ---
+
     try {
         const { projectId, requestedHours, reason, pendingTimesheetData } = req.body;
         const { uid, name, email } = req.user;
@@ -447,6 +502,16 @@ timeRequestRouter.post('/', async (req, res) => {
  * COO/Director approves or rejects a time request.
  */
 timeRequestRouter.put('/', async (req, res) => {
+    
+    // --- FIX: Add internal auth check ---
+    try {
+        await util.promisify(verifyToken)(req, res);
+    } catch (error) {
+        console.error("Auth error in PUT /api/time-requests:", error);
+        return res.status(401).json({ success: false, error: 'Authentication failed', message: error.message });
+    }
+    // --- End of Fix ---
+
     try {
         const { id } = req.query;
         const { action, approvedHours, comment, applyToTimesheet } = req.body;
@@ -515,7 +580,9 @@ timeRequestRouter.put('/', async (req, res) => {
 
     } catch (error) {
         console.error('Error in PUT /time-requests:', error);
-        return res.status(500).json({ success: false, error: error.message });
+        return res.status(5Opening...
+            'Internal server error.'
+        });
     }
 });
 

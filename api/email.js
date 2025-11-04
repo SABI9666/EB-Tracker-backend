@@ -928,18 +928,34 @@ router.post('/trigger', async (req, res) => {
 
     // Get email addresses from Firestore based on roles
     let recipientEmails = await getEmailsForRoles(rolesToNotify);
+    console.log('📋 Initial recipients from roles:', recipientEmails);
+    console.log('📦 Received data:', JSON.stringify(data, null, 2));
 
     // --- SPECIAL CASES ---
     
     // 1. Proposal/Project created - add BDM who created it
     if (event === 'proposal.created' || event === 'project.submitted') {
+      console.log('🔍 Processing BDM email for project submission...');
+      console.log('🔑 data.createdByEmail =', data?.createdByEmail);
+      
       if (data && data.createdByEmail) {
+        console.log('✅ Found createdByEmail, adding to recipients:', data.createdByEmail);
         recipientEmails.push(data.createdByEmail);
-      } else if (data && data.projectId) {
-        // Fallback: try to get BDM from project document
-        const bdmEmail = await getBDMEmailForProject(data.projectId);
-        if (bdmEmail) {
-          recipientEmails.push(bdmEmail);
+      } else {
+        console.log('❌ No createdByEmail provided in data');
+        
+        if (data && data.projectId) {
+          console.log('🔍 Attempting to fetch BDM from projectId:', data.projectId);
+          // Fallback: try to get BDM from project document
+          const bdmEmail = await getBDMEmailForProject(data.projectId);
+          if (bdmEmail) {
+            console.log('✅ Found BDM email from project document:', bdmEmail);
+            recipientEmails.push(bdmEmail);
+          } else {
+            console.log('❌ Could not find BDM email from project document');
+          }
+        } else {
+          console.log('⚠️ No projectId provided either - cannot fetch BDM email');
         }
       }
     }
@@ -975,6 +991,8 @@ router.post('/trigger', async (req, res) => {
 
     // Remove duplicates
     const uniqueEmails = [...new Set(recipientEmails)];
+    console.log('📧 Final unique recipients:', uniqueEmails);
+    console.log('📊 Recipient count:', uniqueEmails.length);
     
     if (uniqueEmails.length === 0) {
       console.log(`No recipients found for event: ${event}`);
@@ -987,7 +1005,7 @@ router.post('/trigger', async (req, res) => {
     // Prepare email content
     const subject = interpolate(template.subject, { ...data, event });
     const htmlContent = interpolate(template.html, { ...data, event });
-    const fromEmail = process.env.YOUR_VERIFIED_DOMAIN_EMAIL || 'sabin@edanbrook.com';
+    const fromEmail = process.env.YOUR_VERIFIED_DOMAIN_EMAIL || 'notifications@ebtracker.com';
 
     // Send email via Resend
     const { data: sendData, error: sendError } = await resend.emails.send({

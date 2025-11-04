@@ -1,4 +1,4 @@
-// File: /api/email.js
+/ File: /api/email.js
 // Enhanced Email API with Professional Templates
 
 const express = require('express');

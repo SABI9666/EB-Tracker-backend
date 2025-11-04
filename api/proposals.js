@@ -251,7 +251,8 @@ const handler = async (req, res) => {
                 clientCompany
             });
             
-            // ⚠️⚠️⚠️ CRITICAL: Trigger email notification ⚠️⚠️⚠️
+            // ⚠️⚠️⚠️ Email notification is now handled by the frontend ⚠️⚠️⚠️
+            /*
             try {
                 console.log('📧 Triggering email for project submission...');
                 console.log('👤 User creating proposal:', {
@@ -305,6 +306,7 @@ const handler = async (req, res) => {
                 console.error('❌ Full error:', emailError);
                 // Don't fail the whole request if email fails
             }
+            */
             
             return res.status(201).json({ 
                 success: true, 

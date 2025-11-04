@@ -987,7 +987,7 @@ router.post('/trigger', async (req, res) => {
     // Prepare email content
     const subject = interpolate(template.subject, { ...data, event });
     const htmlContent = interpolate(template.html, { ...data, event });
-    const fromEmail = process.env.YOUR_VERIFIED_DOMAIN_EMAIL || 'notifications@ebtracker.com';
+    const fromEmail = process.env.YOUR_VERIFIED_DOMAIN_EMAIL || 'sabin@edanbrook.com';
 
     // Send email via Resend
     const { data: sendData, error: sendError } = await resend.emails.send({

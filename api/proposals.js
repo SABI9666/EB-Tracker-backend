@@ -2,6 +2,8 @@
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
+const axios = require('axios'); // ⚠️ ADDED: For email API calls
+
 
 const db = admin.firestore();
 const bucket = admin.storage().bucket();
@@ -248,6 +250,61 @@ const handler = async (req, res) => {
                 projectName,
                 clientCompany
             });
+            
+            // ⚠️⚠️⚠️ CRITICAL: Trigger email notification ⚠️⚠️⚠️
+            try {
+                console.log('📧 Triggering email for project submission...');
+                console.log('👤 User creating proposal:', {
+                    name: req.user.name,
+                    email: req.user.email,
+                    uid: req.user.uid,
+                    role: req.user.role
+                });
+                
+                // Verify email exists
+                if (!req.user.email) {
+                    console.error('❌ CRITICAL: req.user.email is missing!', req.user);
+                    throw new Error('User email not available for notification');
+                }
+                
+                const emailPayload = {
+                    event: 'project.submitted',
+                    data: {
+                        projectName: projectName,
+                        createdBy: req.user.name,
+                        createdByEmail: req.user.email, // ⚠️ THIS SENDS EMAIL TO BDM
+                        date: new Date().toLocaleDateString('en-US', {
+                            year: 'numeric',
+                            month: 'long',
+                            day: 'numeric'
+                        }),
+                        clientName: clientCompany,
+                        description: scopeOfWork,
+                        projectId: docRef.id
+                    }
+                };
+                
+                console.log('📤 Email payload:', JSON.stringify(emailPayload, null, 2));
+                
+                const emailResponse = await axios.post(
+                    `${process.env.API_URL || 'http://localhost:5000'}/api/email/trigger`,
+                    emailPayload,
+                    {
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        timeout: 10000
+                    }
+                );
+                
+                console.log('✅ Email API response:', emailResponse.data);
+                console.log('📊 Email sent to', emailResponse.data.recipientCount, 'recipients');
+                
+            } catch (emailError) {
+                console.error('❌ Email notification failed:', emailError.response?.data || emailError.message);
+                console.error('❌ Full error:', emailError);
+                // Don't fail the whole request if email fails
+            }
             
             return res.status(201).json({ 
                 success: true, 

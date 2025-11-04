@@ -11,7 +11,7 @@ const db = admin.firestore();
 
 // --- 1. Event to Role Map (Who to email) ---
 const EMAIL_RECIPIENT_MAP = {
-  'project.submitted': ['Director','director','bdm', 'COO', 'BDM'],
+  'project.submitted': ['bdm', 'BDM'],
   'project.approved_by_director': ['BDM','bdm'],
   'bom.file_provided_for_estimation': ['Estimator','estimator'],
   'estimation.complete': ['COO'],

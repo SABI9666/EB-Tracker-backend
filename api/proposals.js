@@ -1,4 +1,4 @@
-// api/proposals.js - COMPLETE FIXED VERSION
+// api/proposals.js - COMPLETE UPDATED VERSION
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
@@ -252,6 +252,7 @@ const handler = async (req, res) => {
             let activityDetail = '';
 
             switch (action) {
+                // Case for general details update from Edit Modal
                 case 'update_details':
                     updates = {
                         projectName: data.projectName,
@@ -267,7 +268,7 @@ const handler = async (req, res) => {
                     break;
 
                 case 'add_links':
-                    // Use arrayUnion to add new links without overwriting existing ones
+                    // Use arrayUnion to append new links
                     updates = { 
                         projectLinks: admin.firestore.FieldValue.arrayUnion(...(data.links || [])),
                         updatedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -400,6 +401,75 @@ const handler = async (req, res) => {
                         isRead: false
                     });
                     break;
+
+                // ==================================================================
+                // == NEW CASES: PROJECT NUMBER WORKFLOW ==
+                // ==================================================================
+                case 'set_project_number':
+                     if (req.user.role !== 'coo') return res.status(403).json({ success: false, error: 'Only COO can set project numbers' });
+                     if (!data.projectNumber || !data.projectNumber.trim()) return res.status(400).json({ success: false, error: 'Project number is required' });
+                     
+                     // Unique check
+                     const existingSnapshot = await db.collection('proposals').where('pricing.projectNumber', '==', data.projectNumber.trim()).get();
+                     if (!existingSnapshot.empty && existingSnapshot.docs[0].id !== id) {
+                         return res.status(400).json({ success: false, error: 'This project number already exists.' });
+                     }
+
+                     updates = {
+                         'pricing.projectNumber': data.projectNumber.trim(),
+                         'pricing.projectNumberStatus': 'pending',
+                         'pricing.projectNumberEnteredBy': req.user.name,
+                         'pricing.projectNumberEnteredAt': admin.firestore.FieldValue.serverTimestamp()
+                     };
+                     activityDetail = `Project Number set to ${data.projectNumber} by ${req.user.name}`;
+                     await db.collection('notifications').add({
+                         type: 'project_number_pending_approval',
+                         recipientRole: 'director',
+                         proposalId: id,
+                         message: `Project Number ${data.projectNumber} set by ${req.user.name} for "${proposal.projectName}" - Requires your approval`,
+                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                         isRead: false,
+                         priority: 'high'
+                     });
+                     break;
+
+                case 'approve_project_number':
+                     if (req.user.role !== 'director') return res.status(403).json({ success: false, error: 'Only Director can approve project numbers' });
+                     if (!proposal.pricing || !proposal.pricing.projectNumber) return res.status(400).json({ success: false, error: 'No project number to approve' });
+                     updates = {
+                         'pricing.projectNumberStatus': 'approved',
+                         'pricing.projectNumberApprovedBy': req.user.name,
+                         'pricing.projectNumberApprovedAt': admin.firestore.FieldValue.serverTimestamp()
+                     };
+                     activityDetail = `Project Number ${proposal.pricing.projectNumber} approved by ${req.user.name}`;
+                     await db.collection('notifications').add({
+                         type: 'project_number_approved',
+                         recipientRole: 'coo',
+                         proposalId: id,
+                         message: `Project Number ${proposal.pricing.projectNumber} for "${proposal.projectName}" has been approved by ${req.user.name}`,
+                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                         isRead: false
+                     });
+                     break;
+
+                case 'reject_project_number':
+                     if (req.user.role !== 'director') return res.status(403).json({ success: false, error: 'Only Director can reject project numbers' });
+                     if (!proposal.pricing || !proposal.pricing.projectNumber) return res.status(400).json({ success: false, error: 'No project number to reject' });
+                     updates = {
+                         'pricing.projectNumberStatus': 'rejected',
+                         'pricing.projectNumberRejectionReason': data.reason || 'No reason provided'
+                     };
+                     activityDetail = `Project Number ${proposal.pricing.projectNumber} rejected by ${req.user.name}: ${data.reason}`;
+                     await db.collection('notifications').add({
+                         type: 'project_number_rejected',
+                         recipientRole: 'coo',
+                         proposalId: id,
+                         message: `Project Number ${proposal.pricing.projectNumber} for "${proposal.projectName}" was rejected by ${req.user.name}. Reason: ${data.reason || 'Not specified'}`,
+                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                         isRead: false,
+                         priority: 'high'
+                     });
+                     break;
                 
                 case 'approve_proposal':
                     if (req.user.role !== 'director') {

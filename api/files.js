@@ -7,13 +7,16 @@ const db = admin.firestore();
 const bucket = admin.storage().bucket();
 
 // Configure multer for file uploads
+// WARNING: memoryStorage loads the ENTIRE file into your server's RAM.
+// Ensure your server has enough RAM (3GB+) to handle these large uploads without crashing.
 const upload = multer({
     storage: multer.memoryStorage(),
     limits: {
-        fileSize: 50 * 1024 * 1024, // 50MB limit
+        fileSize: 3 * 1024 * 1024 * 1024, // 3GB limit per file
     },
     fileFilter: (req, file, cb) => {
-        // Allow all file types for now
+        // Allow all file types. 
+        // (Specific type restrictions can be added here if needed later)
         cb(null, true);
     }
 });
@@ -254,10 +257,17 @@ const handler = async (req, res) => {
                 
             } else {
                 // Handle file upload with multer
+                // Allows up to 10 files per request
                 return new Promise((resolve, reject) => {
                     upload.array('files', 10)(req, res, async (err) => {
                         if (err) {
                             console.error('Multer error:', err);
+                            if (err.code === 'LIMIT_FILE_SIZE') {
+                                return res.status(400).json({ success: false, error: 'File too large. Maximum size is 3GB.' });
+                            }
+                            if (err.code === 'LIMIT_FILE_COUNT') {
+                                return res.status(400).json({ success: false, error: 'Too many files. Maximum is 10 at once.' });
+                            }
                             return res.status(400).json({ success: false, error: 'File upload error: ' + err.message });
                         }
 
@@ -300,10 +310,12 @@ const handler = async (req, res) => {
                                 const fileName = `${proposalId || 'general'}/${Date.now()}-${file.originalname}`;
                                 const fileRef = bucket.file(fileName);
                                 
+                                // Upload from RAM buffer to Firebase Storage
                                 await fileRef.save(file.buffer, {
                                     metadata: {
                                         contentType: file.mimetype,
                                     },
+                                    resumable: false // Simple uploads for memory buffers
                                 });
 
                                 // Make file publicly accessible

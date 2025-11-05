@@ -202,7 +202,8 @@ const handler = async (req, res) => {
                 projectName, 
                 clientCompany, 
                 scopeOfWork, 
-                projectType, 
+                projectType, // This may now be an array
+                projectComments, // <-- ADDED THIS
                 priority, 
                 country, 
                 timeline, 
@@ -219,8 +220,10 @@ const handler = async (req, res) => {
             const newProposal = {
                 projectName: projectName.trim(),
                 clientCompany: clientCompany.trim(),
-                projectType: projectType || 'Commercial',
+                // If projectType is an empty array, default to 'Commercial'. Otherwise, store the array.
+                projectType: (Array.isArray(projectType) && projectType.length > 0) ? projectType : (projectType || 'Commercial'),
                 scopeOfWork: scopeOfWork.trim(),
+                projectComments: projectComments || '', // <-- ADDED THIS
                 priority: priority || 'Medium',
                 country: country || 'Not Specified',
                 timeline: timeline || 'Not Specified',
@@ -253,61 +256,6 @@ const handler = async (req, res) => {
             });
             
             // ⚠️⚠️⚠️ Email notification is now handled by the frontend ⚠️⚠️⚠️
-            /*
-            try {
-                console.log('📧 Triggering email for project submission...');
-                console.log('👤 User creating proposal:', {
-                    name: req.user.name,
-                    email: req.user.email,
-                    uid: req.user.uid,
-                    role: req.user.role
-                });
-                
-                // Verify email exists
-                if (!req.user.email) {
-                    console.error('❌ CRITICAL: req.user.email is missing!', req.user);
-                    throw new Error('User email not available for notification');
-                }
-                
-                const emailPayload = {
-                    event: 'project.submitted',
-                    data: {
-                        projectName: projectName,
-                        createdBy: req.user.name,
-                        createdByEmail: req.user.email, // ⚠️ THIS SENDS EMAIL TO BDM
-                        date: new Date().toLocaleDateString('en-US', {
-                            year: 'numeric',
-                            month: 'long',
-                            day: 'numeric'
-                        }),
-                        clientName: clientCompany,
-                        description: scopeOfWork,
-                        projectId: docRef.id
-                    }
-                };
-                
-                console.log('📤 Email payload:', JSON.stringify(emailPayload, null, 2));
-                
-                const emailResponse = await axios.post(
-                    `${process.env.API_URL || 'http://localhost:5000'}/api/email/trigger`,
-                    emailPayload,
-                    {
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        timeout: 10000
-                    }
-                );
-                
-                console.log('✅ Email API response:', emailResponse.data);
-                console.log('📊 Email sent to', emailResponse.data.recipientCount, 'recipients');
-                
-            } catch (emailError) {
-                console.error('❌ Email notification failed:', emailError.response?.data || emailError.message);
-                console.error('❌ Full error:', emailError);
-                // Don't fail the whole request if email fails
-            }
-            */
             
             return res.status(201).json({ 
                 success: true, 

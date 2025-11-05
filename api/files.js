@@ -125,7 +125,13 @@ const handler = async (req, res) => {
         }
 
         if (req.method === 'POST') {
-            if (typeof req.body !== 'object') { try { req.body = JSON.parse(req.body); } catch (e) {} }
+            if (typeof req.body !== 'object') { 
+                try { 
+                    req.body = JSON.parse(req.body); 
+                } catch (e) {
+                    console.error('Failed to parse body:', e);
+                } 
+            }
 
             const { action, links, proposalId, fileType = 'project' } = req.body;
 
@@ -153,6 +159,7 @@ const handler = async (req, res) => {
                     }
                     return res.status(201).json({ success: true, data: uploadedLinks });
                 } catch (error) {
+                    console.error('Link upload error:', error);
                     return res.status(403).json({ success: false, error: error.message });
                 }
             }
@@ -161,46 +168,94 @@ const handler = async (req, res) => {
             if (action === 'get_upload_url') {
                 const { fileName, contentType, size } = req.body;
                 
+                console.log('📤 Getting upload URL for:', fileName, 'Size:', size, 'Type:', contentType);
+                
                 // --- 3GB LIMIT ENFORCEMENT ---
                 const MAX_SIZE = 3 * 1024 * 1024 * 1024; // 3GB
                 if (size && size > MAX_SIZE) {
+                     console.error('❌ File exceeds 3GB limit:', size);
                      return res.status(400).json({ success: false, error: 'File exceeds 3GB limit.' });
                 }
                 // -----------------------------
 
-                if (!fileName) return res.status(400).json({ error: 'Missing file details' });
+                if (!fileName) {
+                    console.error('❌ Missing fileName in request');
+                    return res.status(400).json({ success: false, error: 'Missing file details' });
+                }
 
                 try {
+                    // Check permissions first
                     await checkUploadPermissions(req.user, proposalId, fileType);
+                    
+                    // Create storage path
                     const storagePath = `${proposalId || 'general'}/${Date.now()}-${fileName}`;
+                    console.log('📁 Storage path:', storagePath);
+                    
+                    // Get file reference
                     const fileRef = bucket.file(storagePath);
-                  const [uploadUrl] = await fileRef.getSignedUrl({
+                    
+                    // Generate signed URL
+                    console.log('🔐 Generating signed URL...');
+                    const [uploadUrl] = await fileRef.getSignedUrl({
                         version: 'v4',
                         action: 'write',
                         expires: Date.now() + 60 * 60 * 1000, // 1 hour
-                        contentType: contentType,
+                        contentType: contentType || 'application/octet-stream',
                     });
 
-                    return res.status(200).json({ success: true, data: { uploadUrl, storagePath } });
+                    console.log('✅ Signed URL generated successfully');
+                    return res.status(200).json({ 
+                        success: true, 
+                        data: { uploadUrl, storagePath } 
+                    });
 
-                    
                 } catch (error) {
-                    return res.status(403).json({ success: false, error: error.message });
+                    console.error('❌ Error generating signed URL:', error);
+                    console.error('Error details:', {
+                        message: error.message,
+                        code: error.code,
+                        stack: error.stack
+                    });
+                    return res.status(500).json({ 
+                        success: false, 
+                        error: 'Failed to generate upload URL: ' + error.message 
+                    });
                 }
             }
 
             // CASE 3: Finalize Upload
             if (action === 'finalize_upload') {
                 const { storagePath, originalName, mimeType, fileSize } = req.body;
-                if (!storagePath) return res.status(400).json({ error: 'Missing storage path' });
+                
+                console.log('✅ Finalizing upload:', originalName);
+                
+                if (!storagePath) {
+                    console.error('❌ Missing storage path');
+                    return res.status(400).json({ success: false, error: 'Missing storage path' });
+                }
 
                 try {
                     const fileRef = bucket.file(storagePath);
-                    // Optional: verify size again here if needed by checking fileRef.getMetadata()
                     
+                    // Verify the file exists in storage
+                    console.log('🔍 Verifying file exists in storage...');
+                    const [exists] = await fileRef.exists();
+                    if (!exists) {
+                        console.error('❌ File not found in storage:', storagePath);
+                        return res.status(400).json({ 
+                            success: false, 
+                            error: 'File upload incomplete - file not found in storage' 
+                        });
+                    }
+                    
+                    // Make file public
+                    console.log('🌐 Making file public...');
                     await fileRef.makePublic();
+                    
                     const publicUrl = `https://storage.googleapis.com/${bucket.name}/${storagePath}`;
+                    console.log('✅ Public URL generated:', publicUrl);
 
+                    // Save to Firestore
                     const fileData = {
                         fileName: storagePath,
                         originalName: originalName,
@@ -215,7 +270,9 @@ const handler = async (req, res) => {
                         uploadedByRole: req.user.role
                     };
 
+                    console.log('💾 Saving file record to Firestore...');
                     const docRef = await db.collection('files').add(fileData);
+                    console.log('✅ File record saved:', docRef.id);
                     
                     // Log activity
                     await db.collection('activities').add({
@@ -229,12 +286,30 @@ const handler = async (req, res) => {
                         fileId: docRef.id
                     });
 
-                    return res.status(201).json({ success: true, data: { id: docRef.id, ...fileData } });
+                    return res.status(201).json({ 
+                        success: true, 
+                        data: { id: docRef.id, ...fileData } 
+                    });
+                    
                 } catch (error) {
-                    console.error('Finalize error:', error);
-                    return res.status(500).json({ success: false, error: error.message });
+                    console.error('❌ Finalize error:', error);
+                    console.error('Error details:', {
+                        message: error.message,
+                        code: error.code,
+                        stack: error.stack
+                    });
+                    return res.status(500).json({ 
+                        success: false, 
+                        error: 'Failed to finalize upload: ' + error.message 
+                    });
                 }
             }
+            
+            // If no action matched
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Invalid action. Use get_upload_url or finalize_upload' 
+            });
         }
 
         if (req.method === 'DELETE') {
@@ -250,11 +325,17 @@ const handler = async (req, res) => {
             }
 
             if (fileData.fileType !== 'link' && fileData.fileName) {
-                try { await bucket.file(fileData.fileName).delete(); } 
-                catch (e) { console.warn('Storage delete failed:', e.message); }
+                try { 
+                    await bucket.file(fileData.fileName).delete(); 
+                    console.log('✅ Deleted from storage:', fileData.fileName);
+                } 
+                catch (e) { 
+                    console.warn('⚠️ Storage delete failed:', e.message); 
+                }
             }
 
             await fileDoc.ref.delete();
+            console.log('✅ Deleted from Firestore:', id);
             
              await db.collection('activities').add({
                 type: 'file_deleted',
@@ -270,10 +351,26 @@ const handler = async (req, res) => {
         }
 
         return res.status(405).json({ success: false, error: 'Method not allowed' });
+        
     } catch (error) {
-        console.error('Files API error:', error);
-        return res.status(500).json({ success: false, error: 'Internal Server Error', message: error.message });
+        console.error('❌ Files API error:', error);
+        console.error('Error details:', {
+            message: error.message,
+            stack: error.stack,
+            path: req.path,
+            method: req.method,
+            user: req.user?.email
+        });
+        return res.status(500).json({ 
+            success: false, 
+            error: 'Internal Server Error', 
+            message: error.message 
+        });
     }
 };
 
 module.exports = allowCors(handler);
+
+
+
+

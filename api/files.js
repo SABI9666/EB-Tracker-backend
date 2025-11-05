@@ -174,12 +174,14 @@ const handler = async (req, res) => {
                     await checkUploadPermissions(req.user, proposalId, fileType);
                     const storagePath = `${proposalId || 'general'}/${Date.now()}-${fileName}`;
                     const fileRef = bucket.file(storagePath);
-                    const [url] = await fileRef.getSignedUrl({
+                  const [uploadUrl] = await fileRef.getSignedUrl({
                         version: 'v4',
                         action: 'write',
                         expires: Date.now() + 60 * 60 * 1000, // 1 hour
                         contentType: contentType,
                     });
+
+                    return res.status(200).json({ success: true, data: { uploadUrl, storagePath } });
 
                     return res.status(200).json({ success: true, data: { uploadUrl, storagePath } });
                 } catch (error) {

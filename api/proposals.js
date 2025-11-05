@@ -252,7 +252,6 @@ const handler = async (req, res) => {
             let activityDetail = '';
 
             switch (action) {
-                // === NEW CASE ADDED HERE ===
                 case 'update_details':
                     updates = {
                         projectName: data.projectName,
@@ -268,8 +267,9 @@ const handler = async (req, res) => {
                     break;
 
                 case 'add_links':
+                    // Use arrayUnion to add new links without overwriting existing ones
                     updates = { 
-                        projectLinks: data.links || [],
+                        projectLinks: admin.firestore.FieldValue.arrayUnion(...(data.links || [])),
                         updatedAt: admin.firestore.FieldValue.serverTimestamp()
                     };
                     activityDetail = `Project links added`;

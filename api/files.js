@@ -183,7 +183,7 @@ const handler = async (req, res) => {
 
                     return res.status(200).json({ success: true, data: { uploadUrl, storagePath } });
 
-                    return res.status(200).json({ success: true, data: { uploadUrl, storagePath } });
+                    
                 } catch (error) {
                     return res.status(403).json({ success: false, error: error.message });
                 }

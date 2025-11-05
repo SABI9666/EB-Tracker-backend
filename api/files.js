@@ -63,19 +63,18 @@ async function filterFilesForUser(files, userRole, userUid) {
 }
 
 async function checkUploadPermissions(user, proposalId, fileType) {
-    // BDM Proposal Ownership Check
     if (user.role === 'bdm' && proposalId) {
         const proposalDoc = await db.collection('proposals').doc(proposalId).get();
         if (!proposalDoc.exists || proposalDoc.data().createdByUid !== user.uid) {
             throw new Error('Access denied: You can only add files to your own proposals.');
         }
     }
-    // Role-based Type Check
     if (fileType === 'estimation' && user.role !== 'estimator') {
         throw new Error('Access denied: Only estimators can upload estimation files.');
     }
-    if (fileType === 'project' && user.role !== 'bdm') {
-        throw new Error('Access denied: Only BDMs can upload project files.');
+    if (fileType === 'project' && user.role !== 'bdm' && user.role !== 'design_lead' && user.role !== 'designer') {
+         // Allow Design team to upload project files too
+         throw new Error('Access denied: You do not have permission to upload project files.');
     }
     return true;
 }
@@ -86,7 +85,6 @@ const handler = async (req, res) => {
     try {
         await util.promisify(verifyToken)(req, res);
 
-        // --- GET: List files or get single file ---
         if (req.method === 'GET') {
             const { proposalId, fileId } = req.query;
             
@@ -98,7 +96,6 @@ const handler = async (req, res) => {
                 if (!await canAccessFile(fileData, req.user.role, req.user.uid)) {
                     return res.status(403).json({ success: false, error: 'Access denied.' });
                 }
-                
                 return res.status(200).json({ 
                     success: true, 
                     data: { ...fileData, id: fileDoc.id, canView: true, canDownload: true, canDelete: fileData.uploadedByUid === req.user.uid || req.user.role === 'director' } 
@@ -127,16 +124,12 @@ const handler = async (req, res) => {
             return res.status(200).json({ success: true, data: filteredFiles });
         }
 
-        // --- POST: Handle Uploads (Links & Direct Storage) ---
         if (req.method === 'POST') {
-            // Ensure body is parsed as JSON (Next.js/Express usually handles this if headers are correct)
-            if (typeof req.body !== 'object') {
-                 try { req.body = JSON.parse(req.body); } catch (e) {}
-            }
+            if (typeof req.body !== 'object') { try { req.body = JSON.parse(req.body); } catch (e) {} }
 
             const { action, links, proposalId, fileType = 'project' } = req.body;
 
-            // CASE 1: Upload Links (Legacy support)
+            // CASE 1: Upload Links
             if (links && Array.isArray(links)) {
                 try {
                     await checkUploadPermissions(req.user, proposalId, 'link');
@@ -157,27 +150,30 @@ const handler = async (req, res) => {
                         };
                         const docRef = await db.collection('files').add(linkData);
                         uploadedLinks.push({ id: docRef.id, ...linkData });
-                        // Log activity... (omitted for brevity, same as before)
                     }
-                    return res.status(201).json({ success: true, data: uploadedLinks, message: 'Links added successfully' });
+                    return res.status(201).json({ success: true, data: uploadedLinks });
                 } catch (error) {
                     return res.status(403).json({ success: false, error: error.message });
                 }
             }
 
-            // CASE 2: Get Signed URL for Direct Upload
+            // CASE 2: Get Signed URL (Direct Upload)
             if (action === 'get_upload_url') {
                 const { fileName, contentType, size } = req.body;
-                if (!fileName || !contentType) return res.status(400).json({ error: 'Missing file details' });
+                
+                // --- 3GB LIMIT ENFORCEMENT ---
+                const MAX_SIZE = 3 * 1024 * 1024 * 1024; // 3GB
+                if (size && size > MAX_SIZE) {
+                     return res.status(400).json({ success: false, error: 'File exceeds 3GB limit.' });
+                }
+                // -----------------------------
+
+                if (!fileName) return res.status(400).json({ error: 'Missing file details' });
 
                 try {
                     await checkUploadPermissions(req.user, proposalId, fileType);
-
-                    // Define the storage path
                     const storagePath = `${proposalId || 'general'}/${Date.now()}-${fileName}`;
                     const fileRef = bucket.file(storagePath);
-
-                    // Generate Signed URL (valid for 60 minutes)
                     const [url] = await fileRef.getSignedUrl({
                         version: 'v4',
                         action: 'write',
@@ -185,30 +181,21 @@ const handler = async (req, res) => {
                         contentType: contentType,
                     });
 
-                    return res.status(200).json({
-                        success: true,
-                        data: {
-                            uploadUrl: url,
-                            storagePath: storagePath
-                        }
-                    });
+                    return res.status(200).json({ success: true, data: { uploadUrl, storagePath } });
                 } catch (error) {
                     return res.status(403).json({ success: false, error: error.message });
                 }
             }
 
-            // CASE 3: Finalize Upload (Save Metadata after client finishes uploading)
+            // CASE 3: Finalize Upload
             if (action === 'finalize_upload') {
                 const { storagePath, originalName, mimeType, fileSize } = req.body;
                 if (!storagePath) return res.status(400).json({ error: 'Missing storage path' });
 
                 try {
-                    // Optional: Verify file actually exists in storage now
                     const fileRef = bucket.file(storagePath);
-                    const [exists] = await fileRef.exists();
-                    if (!exists) return res.status(404).json({ error: 'File upload verification failed. File not found in storage.' });
-
-                    // Make public to generate the long-term downloadable URL
+                    // Optional: verify size again here if needed by checking fileRef.getMetadata()
+                    
                     await fileRef.makePublic();
                     const publicUrl = `https://storage.googleapis.com/${bucket.name}/${storagePath}`;
 
@@ -227,11 +214,11 @@ const handler = async (req, res) => {
                     };
 
                     const docRef = await db.collection('files').add(fileData);
-
+                    
                     // Log activity
                     await db.collection('activities').add({
                         type: 'file_uploaded',
-                        details: `File uploaded: ${originalName}${proposalId ? ` for proposal ${proposalId}` : ''}`,
+                        details: `File uploaded: ${originalName}`,
                         performedByName: req.user.name,
                         performedByRole: req.user.role,
                         performedByUid: req.user.uid,
@@ -248,7 +235,6 @@ const handler = async (req, res) => {
             }
         }
 
-        // --- DELETE: Delete file from Storage and Firestore ---
         if (req.method === 'DELETE') {
             const { id } = req.query;
             if (!id) return res.status(400).json({ success: false, error: 'File ID required' });
@@ -263,21 +249,21 @@ const handler = async (req, res) => {
 
             if (fileData.fileType !== 'link' && fileData.fileName) {
                 try { await bucket.file(fileData.fileName).delete(); } 
-                catch (e) { console.warn('Storage delete failed (might already be gone):', e.message); }
+                catch (e) { console.warn('Storage delete failed:', e.message); }
             }
 
             await fileDoc.ref.delete();
             
-            await db.collection('activities').add({
-                type: fileData.fileType === 'link' ? 'link_deleted' : 'file_deleted',
-                details: `${fileData.fileType === 'link' ? 'Link' : 'File'} deleted: ${fileData.originalName}`,
+             await db.collection('activities').add({
+                type: 'file_deleted',
+                details: `File deleted: ${fileData.originalName}`,
                 performedByName: req.user.name,
                 performedByRole: req.user.role,
                 performedByUid: req.user.uid,
                 timestamp: admin.firestore.FieldValue.serverTimestamp(),
                 proposalId: fileData.proposalId || null
             });
-
+            
             return res.status(200).json({ success: true, message: 'Deleted successfully' });
         }
 

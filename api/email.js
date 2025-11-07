@@ -1,4 +1,4 @@
-// api/email.js - Email notification API (FIXED SENDER)
+// api/email.js - Professional Email Notification API
 const express = require('express');
 const { Resend } = require('resend');
 const admin = require('./_firebase-admin');
@@ -9,8 +9,8 @@ const db = admin.firestore();
 // ==========================================
 // CONFIGURATION
 // ==========================================
-// ✅ FIXED: Hardcoded to your verified domain to prevent errors
 const FROM_EMAIL = 'EB-Tracker <sabin@edanbrook.com>'; 
+const DASHBOARD_URL = 'https://edanbrook-tracker.web.app';
 
 const EMAIL_RECIPIENT_MAP = {
   'proposal.created': ['coo', 'director', 'estimator'],
@@ -27,26 +27,385 @@ const EMAIL_RECIPIENT_MAP = {
   'invoice.saved': ['bdm', 'coo', 'director']
 };
 
-// ... (Your existing templates are good, keeping them standard here for brevity, 
-// but you can paste your full EMAIL_TEMPLATE_MAP back if you customized it further)
+// ==========================================
+// PROFESSIONAL HTML EMAIL TEMPLATES
+// ==========================================
+
+// Base HTML wrapper for consistent styling
+function getEmailWrapper(content, footerText = '') {
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EB-Tracker Notification</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7fa;">
+  <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color: #f4f7fa;">
+    <tr>
+      <td style="padding: 40px 20px;">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="600" style="margin: 0 auto; background-color: #ffffff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+          
+          <!-- Header -->
+          <tr>
+            <td style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center; border-radius: 8px 8px 0 0;">
+              <h1 style="margin: 0; color: #ffffff; font-size: 24px; font-weight: 600; letter-spacing: 0.5px;">
+                EB-Tracker
+              </h1>
+              <p style="margin: 5px 0 0 0; color: #e0e7ff; font-size: 14px;">
+                Project Management System
+              </p>
+            </td>
+          </tr>
+          
+          <!-- Content -->
+          <tr>
+            <td style="padding: 40px 30px;">
+              ${content}
+            </td>
+          </tr>
+          
+          <!-- Footer -->
+          <tr>
+            <td style="padding: 20px 30px; background-color: #f8fafc; border-radius: 0 0 8px 8px; text-align: center;">
+              <p style="margin: 0 0 10px 0; color: #64748b; font-size: 13px;">
+                ${footerText || 'This is an automated notification from EB-Tracker'}
+              </p>
+              <p style="margin: 0; color: #94a3b8; font-size: 12px;">
+                © ${new Date().getFullYear()} Edanbrook. All rights reserved.
+              </p>
+            </td>
+          </tr>
+          
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+  `.trim();
+}
+
+// Reusable button component
+function getButton(text, url, color = '#667eea') {
+  return `
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin: 25px 0;">
+      <tr>
+        <td style="border-radius: 6px; background-color: ${color};">
+          <a href="${url}" target="_blank" style="display: inline-block; padding: 14px 32px; font-size: 15px; font-weight: 600; color: #ffffff; text-decoration: none; border-radius: 6px;">
+            ${text}
+          </a>
+        </td>
+      </tr>
+    </table>
+  `;
+}
+
+// Info box component
+function getInfoBox(items) {
+  const rows = items.map(item => `
+    <tr>
+      <td style="padding: 10px 0; border-bottom: 1px solid #e2e8f0;">
+        <strong style="color: #475569; font-size: 14px;">${item.label}:</strong>
+        <span style="color: #1e293b; font-size: 14px; margin-left: 8px;">${item.value}</span>
+      </td>
+    </tr>
+  `).join('');
+  
+  return `
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 20px 0; background-color: #f8fafc; border-radius: 6px; padding: 15px;">
+      ${rows}
+    </table>
+  `;
+}
+
+// Alert/Status banner
+function getStatusBanner(message, type = 'info') {
+  const colors = {
+    success: { bg: '#dcfce7', border: '#22c55e', text: '#166534' },
+    warning: { bg: '#fef3c7', border: '#f59e0b', text: '#92400e' },
+    info: { bg: '#dbeafe', border: '#3b82f6', text: '#1e40af' },
+    error: { bg: '#fee2e2', border: '#ef4444', text: '#991b1b' }
+  };
+  
+  const color = colors[type] || colors.info;
+  
+  return `
+    <div style="background-color: ${color.bg}; border-left: 4px solid ${color.border}; padding: 15px 20px; margin: 20px 0; border-radius: 4px;">
+      <p style="margin: 0; color: ${color.text}; font-size: 14px; line-height: 1.5;">
+        ${message}
+      </p>
+    </div>
+  `;
+}
+
+// ==========================================
+// EMAIL TEMPLATES
+// ==========================================
 const EMAIL_TEMPLATE_MAP = {
   'default': {
     subject: 'Notification from EB-Tracker',
-    html: `<p>{{message}}</p>`
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 20px 0; color: #1e293b; font-size: 20px;">Notification</h2>
+      <p style="margin: 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        ${data.message || 'You have a new notification from EB-Tracker.'}
+      </p>
+      ${getButton('View Dashboard', DASHBOARD_URL)}
+    `)
   },
+
   'proposal.created': {
-    subject: '📄 New Proposal: {{projectName}}',
-    html: `<h2>New Proposal Uploaded</h2><p><strong>Project:</strong> {{projectName}}<br><strong>Client:</strong> {{clientName}}<br><strong>By:</strong> {{createdBy}}</p><a href="{{dashboardUrl}}" style="padding:10px;background:#667eea;color:white;border-radius:5px;text-decoration:none;">View Dashboard</a>`
+    subject: '📄 New Proposal Created: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        📄 New Proposal Created
+      </h2>
+      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        A new proposal has been submitted and requires your attention.
+      </p>
+      ${getInfoBox([
+        { label: 'Project Name', value: data.projectName || 'N/A' },
+        { label: 'Client', value: data.clientName || 'N/A' },
+        { label: 'Created By', value: data.createdBy || 'N/A' },
+        { label: 'Date', value: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) }
+      ])}
+      ${getStatusBanner('Please review the proposal and proceed with estimation.', 'info')}
+      ${getButton('View Proposal', DASHBOARD_URL)}
+    `, 'Please take necessary action on this proposal.')
   },
+
+  'project.submitted': {
+    subject: '📋 Project Submitted for Review: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        📋 Project Submitted for Review
+      </h2>
+      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        A project has been submitted and is awaiting approval.
+      </p>
+      ${getInfoBox([
+        { label: 'Project Name', value: data.projectName || 'N/A' },
+        { label: 'Client', value: data.clientName || 'N/A' },
+        { label: 'Submitted By', value: data.createdBy || 'N/A' }
+      ])}
+      ${getButton('Review Project', DASHBOARD_URL)}
+    `)
+  },
+
   'project.approved_by_director': {
     subject: '✅ Project Approved: {{projectName}}',
-    html: `<h2>Project Approved</h2><p><strong>Project:</strong> {{projectName}} has been approved by the Director.</p>`
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        ✅ Project Approved by Director
+      </h2>
+      ${getStatusBanner('Congratulations! Your project has been approved.', 'success')}
+      ${getInfoBox([
+        { label: 'Project Name', value: data.projectName || 'N/A' },
+        { label: 'Client', value: data.clientName || 'N/A' },
+        { label: 'Approved By', value: 'Director' }
+      ])}
+      <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        The project is now ready to move to the next phase. Please proceed with the necessary arrangements.
+      </p>
+      ${getButton('View Project', DASHBOARD_URL)}
+    `)
   },
+
+  'proposal.uploaded': {
+    subject: '📤 Proposal Uploaded: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        📤 Proposal Document Uploaded
+      </h2>
+      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        A proposal document has been uploaded and is ready for review.
+      </p>
+      ${getInfoBox([
+        { label: 'Project Name', value: data.projectName || 'N/A' },
+        { label: 'Client', value: data.clientName || 'N/A' },
+        { label: 'Uploaded By', value: data.createdBy || 'N/A' }
+      ])}
+      ${getStatusBanner('Please review the proposal document at your earliest convenience.', 'info')}
+      ${getButton('View Document', DASHBOARD_URL)}
+    `)
+  },
+
+  'estimation.complete': {
+    subject: '💰 Estimation Complete: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        💰 Project Estimation Complete
+      </h2>
+      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        The cost estimation has been completed for this project.
+      </p>
+      ${getInfoBox([
+        { label: 'Project Name', value: data.projectName || 'N/A' },
+        { label: 'Client', value: data.clientName || 'N/A' },
+        { label: 'Estimated Cost', value: data.estimatedCost || 'N/A' }
+      ])}
+      ${getStatusBanner('Review the estimation and proceed with pricing allocation.', 'info')}
+      ${getButton('Review Estimation', DASHBOARD_URL)}
+    `)
+  },
+
+  'pricing.allocated': {
+    subject: '💵 Pricing Allocated: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        💵 Pricing Allocated
+      </h2>
+      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        Pricing has been allocated for the project.
+      </p>
+      ${getInfoBox([
+        { label: 'Project Name', value: data.projectName || 'N/A' },
+        { label: 'Client', value: data.clientName || 'N/A' },
+        { label: 'Final Price', value: data.finalPrice || 'N/A' }
+      ])}
+      ${getButton('View Details', DASHBOARD_URL)}
+    `)
+  },
+
   'project.won': {
-    subject: '🎉 Project WON: {{projectName}}',
-    html: `<h2 style="color:green">Project Won!</h2><p><strong>Client:</strong> {{clientName}}</p><p>COO: Please proceed with allocation.</p>`
+    subject: '🎉 Project Won: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #22c55e; font-size: 24px;">
+        🎉 Congratulations! Project Won
+      </h2>
+      ${getStatusBanner('Great news! We have won this project.', 'success')}
+      ${getInfoBox([
+        { label: 'Project Name', value: data.projectName || 'N/A' },
+        { label: 'Client', value: data.clientName || 'N/A' },
+        { label: 'Contract Value', value: data.contractValue || 'N/A' }
+      ])}
+      <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        <strong>Next Steps:</strong> COO to proceed with project allocation and team assignment.
+      </p>
+      ${getButton('View Project', DASHBOARD_URL, '#22c55e')}
+    `, 'Time to celebrate and prepare for project kick-off!')
   },
-  // ... Add other specific templates here as needed
+
+  'project.allocated': {
+    subject: '👥 Project Allocated: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        👥 Project Team Allocated
+      </h2>
+      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        A project has been allocated to your team.
+      </p>
+      ${getInfoBox([
+        { label: 'Project Name', value: data.projectName || 'N/A' },
+        { label: 'Client', value: data.clientName || 'N/A' },
+        { label: 'Design Lead', value: data.designLead || 'N/A' },
+        { label: 'Start Date', value: data.startDate || 'N/A' }
+      ])}
+      ${getStatusBanner('Please coordinate with your team and begin project planning.', 'info')}
+      ${getButton('View Project', DASHBOARD_URL)}
+    `)
+  },
+
+  'designer.allocated': {
+    subject: '🎨 New Project Assignment: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        🎨 You've Been Assigned to a Project
+      </h2>
+      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        You have been assigned as a designer for the following project.
+      </p>
+      ${getInfoBox([
+        { label: 'Project Name', value: data.projectName || 'N/A' },
+        { label: 'Client', value: data.clientName || 'N/A' },
+        { label: 'Your Role', value: data.designerRole || 'Designer' },
+        { label: 'Design Lead', value: data.designLead || 'N/A' }
+      ])}
+      ${getStatusBanner('Please review project details and contact your design lead for briefing.', 'info')}
+      ${getButton('View Project', DASHBOARD_URL)}
+    `)
+  },
+
+  'variation.allocated': {
+    subject: '🔄 Variation Request: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        🔄 New Variation Request
+      </h2>
+      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        A variation has been requested for the following project.
+      </p>
+      ${getInfoBox([
+        { label: 'Project Name', value: data.projectName || 'N/A' },
+        { label: 'Client', value: data.clientName || 'N/A' },
+        { label: 'Variation Type', value: data.variationType || 'N/A' },
+        { label: 'Requested By', value: data.requestedBy || 'N/A' }
+      ])}
+      ${getStatusBanner('Please review and approve or reject this variation request.', 'warning')}
+      ${getButton('Review Variation', DASHBOARD_URL, '#f59e0b')}
+    `)
+  },
+
+  'variation.approved': {
+    subject: '✅ Variation Approved: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        ✅ Variation Request Approved
+      </h2>
+      ${getStatusBanner('The variation request has been approved.', 'success')}
+      ${getInfoBox([
+        { label: 'Project Name', value: data.projectName || 'N/A' },
+        { label: 'Client', value: data.clientName || 'N/A' },
+        { label: 'Variation Type', value: data.variationType || 'N/A' },
+        { label: 'Approved By', value: data.approvedBy || 'N/A' }
+      ])}
+      <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        Please proceed with implementing the approved changes.
+      </p>
+      ${getButton('View Details', DASHBOARD_URL)}
+    `)
+  },
+
+  'invoice.saved': {
+    subject: '🧾 Invoice Generated: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        🧾 Invoice Generated
+      </h2>
+      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        A new invoice has been generated for the following project.
+      </p>
+      ${getInfoBox([
+        { label: 'Project Name', value: data.projectName || 'N/A' },
+        { label: 'Client', value: data.clientName || 'N/A' },
+        { label: 'Invoice Number', value: data.invoiceNumber || 'N/A' },
+        { label: 'Amount', value: data.invoiceAmount || 'N/A' },
+        { label: 'Date', value: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) }
+      ])}
+      ${getStatusBanner('Invoice is ready for review and dispatch to client.', 'info')}
+      ${getButton('View Invoice', DASHBOARD_URL)}
+    `)
+  },
+
+  'time_request.approved': {
+    subject: '⏰ Time Request Approved: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        ⏰ Additional Time Approved
+      </h2>
+      ${getStatusBanner('Your request for additional time has been approved.', 'success')}
+      ${getInfoBox([
+        { label: 'Project Name', value: data.projectName || 'N/A' },
+        { label: 'Additional Hours', value: data.additionalHours || 'N/A' },
+        { label: 'Approved By', value: data.approvedBy || 'N/A' }
+      ])}
+      <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        You may proceed with the additional time allocated to complete your work.
+      </p>
+      ${getButton('View Project', DASHBOARD_URL)}
+    `)
+  }
 };
 
 // ==========================================
@@ -56,7 +415,7 @@ async function getEmailsForRoles(roles) {
   if (!roles || roles.length === 0) return [];
   try {
     const normalizedRoles = roles.map(r => r.toLowerCase().trim());
-    // console.log(`🔍 Looking up roles: ${normalizedRoles.join(', ')}`);
+    console.log(`🔍 Looking up roles: ${normalizedRoles.join(', ')}`);
     const snapshot = await db.collection('users').where('role', 'in', normalizedRoles).get();
     return snapshot.docs.map(doc => doc.data().email).filter(e => e && e.includes('@'));
   } catch (error) {
@@ -91,7 +450,7 @@ function interpolate(template, data) {
   for (const key in data) {
     result = result.replace(new RegExp(`{{${key}}}`, 'g'), data[key] || 'N/A');
   }
-  return result.replace(/{{dashboardUrl}}/g, 'https://edanbrook-tracker.web.app'); 
+  return result;
 }
 
 // ==========================================
@@ -113,7 +472,6 @@ async function sendEmailNotification(event, data) {
   // 2. Dynamic Additions
   // Add BDM?
   if (['proposal.created', 'project.submitted', 'project.approved_by_director', 'variation.approved', 'invoice.saved'].includes(event)) {
-      // Try data first, then DB lookup
       let bdmEmail = data.createdByEmail || data.bdmEmail;
       if (!bdmEmail) bdmEmail = await getBDMEmail(data.projectId, data.proposalId);
       
@@ -125,6 +483,7 @@ async function sendEmailNotification(event, data) {
   // Add Designer?
   if (['designer.allocated', 'time_request.approved'].includes(event) && data.designerEmail) {
       recipients.push(data.designerEmail);
+      console.log(`🎨 Added Designer: ${data.designerEmail}`);
   }
 
   // 3. Clean List
@@ -136,14 +495,18 @@ async function sendEmailNotification(event, data) {
       return { success: false, message: 'No recipients found' };
   }
 
-  // 4. Send
+  // 4. Build Email
   try {
     const tmpl = EMAIL_TEMPLATE_MAP[event] || EMAIL_TEMPLATE_MAP['default'];
-    const html = interpolate(tmpl.html, data);
+    
+    // Generate HTML (templates are now functions)
+    const html = typeof tmpl.html === 'function' ? tmpl.html(data) : interpolate(tmpl.html, data);
     const subject = interpolate(tmpl.subject, data);
 
     console.log(`🚀 Sending from [${FROM_EMAIL}] to [${recipients.length}] recipients...`);
+    console.log(`📧 Recipients: ${recipients.join(', ')}`);
     
+    // 5. Send via Resend
     const result = await resend.emails.send({
       from: FROM_EMAIL,
       to: recipients,
@@ -157,7 +520,12 @@ async function sendEmailNotification(event, data) {
 
     console.log(`✅ SENT! ID: ${result.data?.id}`);
     console.log('📨 --- END EMAIL (SUCCESS) ---\n');
-    return { success: true, id: result.data?.id, recipients: recipients.length };
+    return { 
+      success: true, 
+      id: result.data?.id, 
+      recipients: recipients.length,
+      recipientList: recipients 
+    };
 
   } catch (error) {
     console.error('❌ RESEND FAILED:', error.message);
@@ -166,14 +534,33 @@ async function sendEmailNotification(event, data) {
   }
 }
 
-// API Trigger
+// ==========================================
+// API ENDPOINT
+// ==========================================
 emailRouter.post('/trigger', async (req, res) => {
   try {
-    const result = await sendEmailNotification(req.body.event, req.body.data || {});
+    const { event, data } = req.body;
+    
+    if (!event) {
+      return res.status(400).json({ error: 'Event type is required' });
+    }
+    
+    const result = await sendEmailNotification(event, data || {});
     res.json(result);
   } catch (e) {
+    console.error('API Error:', e);
     res.status(500).json({ error: e.message });
   }
+});
+
+// Health check endpoint
+emailRouter.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    service: 'email-notifications',
+    from: FROM_EMAIL,
+    hasApiKey: !!process.env.RESEND_API_KEY
+  });
 });
 
 module.exports = { emailHandler: emailRouter, sendEmailNotification };

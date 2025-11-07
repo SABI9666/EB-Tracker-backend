@@ -21,7 +21,7 @@ const EMAIL_RECIPIENT_MAP = {
   'pricing.complete': ['director'], // COO completes pricing → Director approves
   'pricing.allocated': ['director'], // For backwards compatibility
   'project.won': ['coo', 'director'],
-  'project.allocated': ['design_lead'], 
+  'project.allocated': ['design_lead', 'designmanager'], // COO allocates → Design Manager
   'designer.allocated': [], // Dynamic only (Designer)
   'variation.allocated': ['bdm', 'coo', 'director'],
   'variation.approved': ['bdm', 'coo', 'director', 'design_lead'],
@@ -314,23 +314,28 @@ const EMAIL_TEMPLATE_MAP = {
   },
 
   'project.allocated': {
-    subject: '👥 Project Allocated: {{projectName}}',
+    subject: '👥 New Project Allocated: {{projectName}}',
     html: (data) => getEmailWrapper(`
       <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
-        👥 Project Team Allocated
+        👥 New Project Allocated by COO
       </h2>
+      ${getStatusBanner('A new project has been allocated and requires your attention for team assignment.', 'info')}
       <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        A project has been allocated to your team.
+        The COO has allocated this project. Please review the project details and proceed with designer allocation.
       </p>
       ${getInfoBox([
         { label: 'Project Name', value: data.projectName || 'N/A' },
         { label: 'Client', value: data.clientName || 'N/A' },
-        { label: 'Design Lead', value: data.designLead || 'N/A' },
-        { label: 'Start Date', value: data.startDate || 'N/A' }
+        { label: 'Design Lead', value: data.designLead || data.designManager || 'To be assigned' },
+        { label: 'Project Value', value: data.projectValue || data.finalPrice || 'N/A' },
+        { label: 'Start Date', value: data.startDate || 'N/A' },
+        { label: 'Allocated By', value: 'COO' }
       ])}
-      ${getStatusBanner('Please coordinate with your team and begin project planning.', 'info')}
-      ${getButton('View Project', DASHBOARD_URL)}
-    `)
+      <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        <strong>Next Steps:</strong> Review project requirements and allocate designers to the project team.
+      </p>
+      ${getButton('View Project & Allocate Team', DASHBOARD_URL)}
+    `, 'Please proceed with team allocation at your earliest convenience.')
   },
 
   'designer.allocated': {

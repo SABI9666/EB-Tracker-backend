@@ -2,7 +2,7 @@
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
-const { sendEmailNotification } = require('./email'); // ✅ ADDED EMAIL IMPORT
+const { sendEmailNotification } = require('./email'); // ✅ EMAIL IMPORT ADDED
 
 const db = admin.firestore();
 
@@ -418,69 +418,88 @@ const handler = async (req, res) => {
                     });
                 }
                 
-                if (!['coo', 'director', 'design_lead'].includes(req.user.role)) {
+                if (!['design_lead', 'coo', 'director'].includes(req.user.role)) {
                     return res.status(403).json({ 
                         success: false, 
-                        error: 'Only Design Lead or COO/Director can assign designers' 
+                        error: 'Only Design Lead, COO, or Director can assign designers' 
                     });
                 }
                 
-                const designers = data.designers || [];
-                if (designers.length === 0) {
-                    return res.status(400).json({ 
-                        success: false, 
-                        error: 'At least one designer must be assigned' 
+                const designerUids = data.designerUids || [];
+                const designerNames = data.designerNames || [];
+                const designerEmails = data.designerEmails || [];
+                const designerHoursMap = data.designerHours || {};
+                const totalAllocatedHours = data.totalAllocatedHours || 0;
+                
+                // Validate at least one designer is selected
+                if (designerUids.length === 0) {
+                    return res.status(400).json({
+                        success: false,
+                        error: 'At least one designer must be assigned'
                     });
                 }
                 
-                // Validate designers exist and are designers
                 const validatedDesigners = [];
-                for (const designer of designers) {
-                    const designerDoc = await db.collection('users').doc(designer.uid).get();
-                    if (!designerDoc.exists) {
-                        return res.status(404).json({ 
-                            success: false, 
-                            error: `Designer ${designer.name} not found` 
+                
+                // Validation for allocated hours
+                const maxHours = (project.maxAllocatedHours || 0) + (project.additionalHours || 0);
+                if (maxHours > 0 && totalAllocatedHours > maxHours) {
+                    return res.status(400).json({
+                        success: false,
+                        error: `Total allocated hours (${totalAllocatedHours}) exceeds available budget (${maxHours})`
+                    });
+                }
+                
+                // Validate all designers from database
+                for (let i = 0; i < designerUids.length; i++) {
+                    const uid = designerUids[i];
+                    const userDoc = await db.collection('users').doc(uid).get();
+                    
+                    if (!userDoc.exists) {
+                        return res.status(400).json({
+                            success: false,
+                            error: `Designer not found: ${designerNames[i] || uid}`
                         });
                     }
                     
-                    const designerData = designerDoc.data();
-                    if (designerData.role !== 'designer') {
-                        return res.status(400).json({ 
-                            success: false, 
-                            error: `${designer.name} is not a designer` 
+                    const userData = userDoc.data();
+                    if (userData.role !== 'designer') {
+                        return res.status(400).json({
+                            success: false,
+                            error: `User ${userData.name} is not a designer`
                         });
                     }
+                    
+                    // Use email from frontend or Firestore
+                    const designerEmail = designerEmails[i] || userData.email;
                     
                     validatedDesigners.push({
-                        uid: designer.uid,
-                        name: designerData.name,
-                        email: designerData.email,
-                        allocatedHours: parseFloat(designer.allocatedHours || 0),
-                        assignedAt: admin.firestore.FieldValue.serverTimestamp(),
-                        assignedBy: req.user.name
+                        uid: uid,
+                        name: userData.name,
+                        email: designerEmail
                     });
                     
                     // Notify each designer
                     notifications.push({
-                        type: 'designer_assigned',
-                        recipientUid: designer.uid,
+                        type: 'project_assigned',
+                        recipientUid: uid,
                         recipientRole: 'designer',
-                        message: `You have been assigned to project: "${project.projectName}"`,
+                        message: `New project assigned: "${project.projectName}" (${designerHoursMap[uid] || 0} hours allocated)`,
                         projectId: id,
                         projectName: project.projectName,
                         clientCompany: project.clientCompany,
-                        allocatedHours: designer.allocatedHours,
+                        assignedBy: req.user.name,
+                        allocatedHours: designerHoursMap[uid] || 0,
                         priority: 'high'
                     });
                     
                     // ✅ SEND EMAIL NOTIFICATION TO DESIGNER + COO
-                    console.log(`\n📧 Sending designer allocation email for ${designerData.name}...`);
+                    console.log(`\n📧 Sending designer allocation email for ${userData.name}...`);
                     try {
                         const emailResult = await sendEmailNotification('designer.allocated', {
                             projectName: project.projectName || 'Project',
                             clientName: project.clientCompany || project.clientName || 'Client',
-                            designerEmail: designerData.email,  // ⚠️ CRITICAL
+                            designerEmail: designerEmail,  // ⚠️ CRITICAL
                             designerRole: 'Designer',
                             designManager: project.designLeadName || req.user.name,
                             allocatedBy: req.user.name,
@@ -496,23 +515,30 @@ const handler = async (req, res) => {
                         }
                     } catch (emailError) {
                         console.error('❌ Email error:', emailError);
+                        // Don't fail the assignment just because email failed
                     }
                 }
                 
                 updates = {
-                    designers: validatedDesigners,
-                    designersAssignedAt: admin.firestore.FieldValue.serverTimestamp(),
-                    designersAssignedBy: req.user.name,
+                    assignedDesigners: validatedDesigners.map(d => d.uid),
+                    assignedDesignerNames: validatedDesigners.map(d => d.name),
+                    assignedDesignerEmails: validatedDesigners.map(d => d.email),
+                    assignmentDate: admin.firestore.FieldValue.serverTimestamp(),
+                    assignedBy: req.user.name,
+                    assignedByUid: req.user.uid,
+                    assignedDesignerHours: designerHoursMap,
+                    totalAllocatedHours: totalAllocatedHours,
+                    hoursLogged: 0,
                     status: 'in_progress',
-                    designStatus: 'designers_assigned'
+                    designStatus: 'in_progress'
                 };
                 
-                activityDetail = `Designers assigned: ${validatedDesigners.map(d => d.name).join(', ')}`;
+                activityDetail = `Designers assigned: ${validatedDesigners.map(d => d.name).join(', ')} with a total of ${totalAllocatedHours} hours.`;
             }
-            
-            // Design Lead marking project as complete
+
+            // Design Lead/Manager marking project as complete
             else if (action === 'mark_complete') {
-                // Only Design Lead can mark complete
+                // Only allocated Design Lead, COO, or Director can complete
                 if (req.user.role === 'design_lead' && project.designLeadUid !== req.user.uid) {
                     return res.status(403).json({ 
                         success: false, 
@@ -520,10 +546,10 @@ const handler = async (req, res) => {
                     });
                 }
                 
-                if (req.user.role !== 'design_lead') {
+                if (!['design_lead', 'coo', 'director'].includes(req.user.role)) {
                     return res.status(403).json({ 
                         success: false, 
-                        error: 'Only Design Lead can mark project as complete' 
+                        error: 'Only the Design Lead, COO, or Director can complete this project' 
                     });
                 }
                 

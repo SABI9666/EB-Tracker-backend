@@ -1,4 +1,4 @@
-// api/email.js - Professional Email Notification API
+// api/email.js - Enhanced Email Notification API with Timesheet & Invoice Notifications
 const express = require('express');
 const { Resend } = require('resend');
 const admin = require('./_firebase-admin');
@@ -25,7 +25,17 @@ const EMAIL_RECIPIENT_MAP = {
   'designer.allocated': ['coo'], // Design Manager allocates → Designer (+ dynamic Designer)
   'variation.allocated': ['bdm', 'coo', 'director'],
   'variation.approved': ['bdm', 'coo', 'director', 'design_lead'],
-  'invoice.saved': ['bdm', 'coo', 'director']
+  'invoice.saved': ['bdm', 'coo', 'director'],
+  
+  // New notification types for timesheet workflow
+  'time_request.created': ['design_lead', 'coo', 'director'], // Designer requests additional hours
+  'time_request.approved': ['designer', 'design_lead', 'director'], // COO approves additional hours
+  'time_request.rejected': ['designer', 'design_lead'], // COO rejects additional hours
+  'variation.requested': ['coo', 'director'], // Design Manager requests variation
+  'variation.approved_detail': ['design_lead', 'bdm', 'director', 'coo'], // Variation approval with hour/rate details
+  'invoice.created': ['coo', 'director', 'bdm'], // Invoice created
+  'invoice.payment_due': ['coo', 'director', 'bdm'], // Payment due reminder
+  'invoice.overdue': ['coo', 'director', 'bdm'] // Overdue payment notification
 };
 
 // ==========================================
@@ -127,7 +137,8 @@ function getStatusBanner(message, type = 'info') {
     success: { bg: '#dcfce7', border: '#22c55e', text: '#166534' },
     warning: { bg: '#fef3c7', border: '#f59e0b', text: '#92400e' },
     info: { bg: '#dbeafe', border: '#3b82f6', text: '#1e40af' },
-    error: { bg: '#fee2e2', border: '#ef4444', text: '#991b1b' }
+    error: { bg: '#fee2e2', border: '#ef4444', text: '#991b1b' },
+    urgent: { bg: '#fef2f2', border: '#dc2626', text: '#7f1d1d' }
   };
   
   const color = colors[type] || colors.info;
@@ -141,8 +152,28 @@ function getStatusBanner(message, type = 'info') {
   `;
 }
 
+// Format currency
+function formatCurrency(amount) {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2
+  }).format(amount || 0);
+}
+
+// Format date
+function formatDate(date) {
+  if (!date) return 'N/A';
+  const d = date instanceof Date ? date : new Date(date);
+  return d.toLocaleDateString('en-US', { 
+    year: 'numeric', 
+    month: 'long', 
+    day: 'numeric' 
+  });
+}
+
 // ==========================================
-// EMAIL TEMPLATES
+// EMAIL TEMPLATES (Including New Templates)
 // ==========================================
 const EMAIL_TEMPLATE_MAP = {
   'default': {
@@ -156,6 +187,215 @@ const EMAIL_TEMPLATE_MAP = {
     `)
   },
 
+  // =============== TIMESHEET TEMPLATES ===============
+  'time_request.created': {
+    subject: '⏰ Additional Time Request: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        ⏰ Additional Time Request Submitted
+      </h2>
+      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        A designer has requested additional hours for the following project:
+      </p>
+      ${getInfoBox([
+        { label: 'Project', value: `${data.projectName} (${data.projectCode || 'N/A'})` },
+        { label: 'Client', value: data.clientCompany || 'N/A' },
+        { label: 'Designer', value: data.designerName || 'N/A' },
+        { label: 'Requested Hours', value: `${data.requestedHours || 0} hours` },
+        { label: 'Current Hours Logged', value: `${data.currentHoursLogged || 0} hours` },
+        { label: 'Current Allocated', value: `${data.currentAllocatedHours || 0} hours` },
+        { label: 'Reason', value: data.reason || 'No reason provided' }
+      ])}
+      ${getStatusBanner('This request requires approval from COO/Director.', 'warning')}
+      ${getButton('Review Request', `${DASHBOARD_URL}/time-requests`)}
+    `, 'Please review and approve/reject this time request.')
+  },
+
+  'time_request.approved': {
+    subject: '✅ Additional Time Approved: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        ✅ Additional Time Request Approved
+      </h2>
+      ${getStatusBanner('Your request for additional time has been approved!', 'success')}
+      ${getInfoBox([
+        { label: 'Project', value: `${data.projectName} (${data.projectCode || 'N/A'})` },
+        { label: 'Requested Hours', value: `${data.requestedHours || 0} hours` },
+        { label: 'Approved Hours', value: `${data.approvedHours || 0} hours` },
+        { label: 'Approved By', value: data.approvedBy || 'COO' },
+        { label: 'Approval Date', value: formatDate(new Date()) },
+        { label: 'Comments', value: data.comments || 'No additional comments' }
+      ])}
+      <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        The approved hours have been added to your project allocation. You may proceed with logging your timesheet.
+      </p>
+      ${getButton('View Project', `${DASHBOARD_URL}/projects/${data.projectId}`)}
+    `)
+  },
+
+  'time_request.rejected': {
+    subject: '❌ Additional Time Request Rejected: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        ❌ Additional Time Request Rejected
+      </h2>
+      ${getStatusBanner('Your request for additional time has been rejected.', 'error')}
+      ${getInfoBox([
+        { label: 'Project', value: `${data.projectName} (${data.projectCode || 'N/A'})` },
+        { label: 'Requested Hours', value: `${data.requestedHours || 0} hours` },
+        { label: 'Rejected By', value: data.rejectedBy || 'COO' },
+        { label: 'Reason', value: data.rejectReason || 'No reason provided' }
+      ])}
+      <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        Please contact your Design Manager if you need to discuss this further.
+      </p>
+      ${getButton('View Project', `${DASHBOARD_URL}/projects/${data.projectId}`)}
+    `)
+  },
+
+  // =============== VARIATION TEMPLATES ===============
+  'variation.requested': {
+    subject: '📊 Variation Request: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        📊 Variation Request Submitted
+      </h2>
+      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        A Design Manager has submitted a variation request for approval:
+      </p>
+      ${getInfoBox([
+        { label: 'Project', value: `${data.projectName} (${data.projectCode || 'N/A'})` },
+        { label: 'Client', value: data.clientCompany || 'N/A' },
+        { label: 'Variation Type', value: data.variationType || 'N/A' },
+        { label: 'Requested By', value: data.requestedBy || 'N/A' },
+        { label: 'Description', value: data.variationDescription || 'N/A' }
+      ])}
+      ${getStatusBanner('This variation requires your approval.', 'warning')}
+      ${getButton('Review Variation', `${DASHBOARD_URL}/variations`)}
+    `)
+  },
+
+  'variation.approved_detail': {
+    subject: '✅ Variation Approved: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        ✅ Variation Approved with Details
+      </h2>
+      ${getStatusBanner('The variation request has been approved with the following details:', 'success')}
+      ${getInfoBox([
+        { label: 'Project', value: `${data.projectName} (${data.projectCode || 'N/A'})` },
+        { label: 'Client', value: data.clientCompany || 'N/A' },
+        { label: 'Variation Type', value: data.variationType || 'N/A' },
+        { label: 'Additional Hours', value: data.additionalHours ? `${data.additionalHours} hours` : 'N/A' },
+        { label: 'New Rate', value: data.newRate ? formatCurrency(data.newRate) : 'N/A' },
+        { label: 'Total Impact', value: data.totalImpact ? formatCurrency(data.totalImpact) : 'N/A' },
+        { label: 'Approved By', value: data.approvedBy || 'N/A' },
+        { label: 'Approval Date', value: formatDate(new Date()) }
+      ])}
+      <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        Please update your project plans accordingly and communicate these changes to your team.
+      </p>
+      ${getButton('View Project Details', `${DASHBOARD_URL}/projects/${data.projectId}`)}
+    `)
+  },
+
+  // =============== INVOICE TEMPLATES ===============
+  'invoice.created': {
+    subject: '💰 New Invoice Created: {{projectName}} - {{invoiceNumber}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        💰 New Invoice Created
+      </h2>
+      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        A new invoice has been generated and requires your review:
+      </p>
+      ${getInfoBox([
+        { label: 'Invoice Number', value: data.invoiceNumber || 'N/A' },
+        { label: 'Project', value: `${data.projectName} (${data.projectCode || 'N/A'})` },
+        { label: 'Client', value: data.clientCompany || 'N/A' },
+        { label: 'Invoice Amount', value: formatCurrency(data.invoiceAmount) },
+        { label: 'Due Date', value: formatDate(data.dueDate) },
+        { label: 'Created By', value: data.createdBy || 'Accounts' },
+        { label: 'Payment Terms', value: data.paymentTerms || 'Net 30' }
+      ])}
+      ${getStatusBanner('Please review and approve this invoice before sending to the client.', 'info')}
+      ${getButton('View Invoice', `${DASHBOARD_URL}/invoices/${data.invoiceId}`)}
+    `, 'Invoice requires review and approval.')
+  },
+
+  'invoice.payment_due': {
+    subject: '⚠️ Payment Due Reminder: {{invoiceNumber}} - {{clientCompany}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        ⚠️ Payment Due Reminder
+      </h2>
+      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        The following invoice payment is due soon:
+      </p>
+      ${getInfoBox([
+        { label: 'Invoice Number', value: data.invoiceNumber || 'N/A' },
+        { label: 'Client', value: data.clientCompany || 'N/A' },
+        { label: 'Project', value: data.projectName || 'N/A' },
+        { label: 'Invoice Amount', value: formatCurrency(data.invoiceAmount) },
+        { label: 'Due Date', value: formatDate(data.dueDate) },
+        { label: 'Days Until Due', value: `${data.daysUntilDue || 0} days` },
+        { label: 'Contact Person', value: data.contactPerson || 'N/A' }
+      ])}
+      ${getStatusBanner(`Payment is due in ${data.daysUntilDue || 0} days. Please follow up with the client if necessary.`, 'warning')}
+      
+      <div style="margin: 25px 0; padding: 20px; background-color: #f0f9ff; border-radius: 6px;">
+        <h3 style="margin: 0 0 10px 0; color: #0369a1; font-size: 16px;">Recommended Actions:</h3>
+        <ul style="margin: 10px 0; padding-left: 20px; color: #0c4a6e; font-size: 14px;">
+          <li style="margin: 5px 0;">Send a courtesy reminder to the client</li>
+          <li style="margin: 5px 0;">Verify the invoice was received</li>
+          <li style="margin: 5px 0;">Check if there are any issues with the invoice</li>
+          <li style="margin: 5px 0;">Update the payment status in the system</li>
+        </ul>
+      </div>
+      
+      ${getButton('View Invoice Details', `${DASHBOARD_URL}/invoices/${data.invoiceId}`)}
+    `, 'Payment reminder - please take necessary action.')
+  },
+
+  'invoice.overdue': {
+    subject: '🔴 OVERDUE Payment: {{invoiceNumber}} - {{clientCompany}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #dc2626; font-size: 22px;">
+        🔴 OVERDUE Payment Alert
+      </h2>
+      ${getStatusBanner('This invoice is now OVERDUE. Immediate action required.', 'urgent')}
+      ${getInfoBox([
+        { label: 'Invoice Number', value: data.invoiceNumber || 'N/A' },
+        { label: 'Client', value: data.clientCompany || 'N/A' },
+        { label: 'Project', value: data.projectName || 'N/A' },
+        { label: 'Invoice Amount', value: formatCurrency(data.invoiceAmount) },
+        { label: 'Original Due Date', value: formatDate(data.dueDate) },
+        { label: 'Days Overdue', value: `${data.daysOverdue || 0} days` },
+        { label: 'Contact Person', value: data.contactPerson || 'N/A' },
+        { label: 'Contact Email', value: data.contactEmail || 'N/A' },
+        { label: 'Contact Phone', value: data.contactPhone || 'N/A' }
+      ])}
+      
+      <div style="margin: 25px 0; padding: 20px; background-color: #fef2f2; border-radius: 6px; border: 1px solid #fecaca;">
+        <h3 style="margin: 0 0 10px 0; color: #991b1b; font-size: 16px;">⚠️ Escalation Required:</h3>
+        <ul style="margin: 10px 0; padding-left: 20px; color: #7f1d1d; font-size: 14px;">
+          <li style="margin: 5px 0;">Contact client immediately via phone</li>
+          <li style="margin: 5px 0;">Send formal overdue notice</li>
+          <li style="margin: 5px 0;">Consider suspending ongoing work if necessary</li>
+          <li style="margin: 5px 0;">Escalate to senior management</li>
+          <li style="margin: 5px 0;">Review payment terms for future projects</li>
+        </ul>
+      </div>
+      
+      <p style="margin: 20px 0; color: #dc2626; font-size: 15px; font-weight: 600;">
+        This requires immediate attention to maintain cash flow and client relationships.
+      </p>
+      
+      ${getButton('View Invoice & Take Action', `${DASHBOARD_URL}/invoices/${data.invoiceId}`, '#dc2626')}
+    `, 'URGENT: Overdue payment requires immediate action.')
+  },
+
+  // Keep existing templates
   'proposal.created': {
     subject: '📄 New Proposal Created: {{projectName}}',
     html: (data) => getEmailWrapper(`
@@ -169,7 +409,7 @@ const EMAIL_TEMPLATE_MAP = {
         { label: 'Project Name', value: data.projectName || 'N/A' },
         { label: 'Client', value: data.clientName || 'N/A' },
         { label: 'Created By', value: data.createdBy || 'N/A' },
-        { label: 'Date', value: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) }
+        { label: 'Date', value: formatDate(new Date()) }
       ])}
       ${getStatusBanner('Please review the proposal and proceed with estimation.', 'info')}
       ${getButton('View Proposal', DASHBOARD_URL)}
@@ -208,235 +448,6 @@ const EMAIL_TEMPLATE_MAP = {
       ])}
       <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
         The project is now ready to move to the next phase. Please proceed with the necessary arrangements.
-      </p>
-      ${getButton('View Project', DASHBOARD_URL)}
-    `)
-  },
-
-  'proposal.uploaded': {
-    subject: '📤 Proposal Uploaded: {{projectName}}',
-    html: (data) => getEmailWrapper(`
-      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
-        📤 Proposal Document Uploaded
-      </h2>
-      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        A proposal document has been uploaded and is ready for review.
-      </p>
-      ${getInfoBox([
-        { label: 'Project Name', value: data.projectName || 'N/A' },
-        { label: 'Client', value: data.clientName || 'N/A' },
-        { label: 'Uploaded By', value: data.createdBy || 'N/A' }
-      ])}
-      ${getStatusBanner('Please review the proposal document at your earliest convenience.', 'info')}
-      ${getButton('View Document', DASHBOARD_URL)}
-    `)
-  },
-
-  'estimation.complete': {
-    subject: '💰 Estimation Complete: {{projectName}}',
-    html: (data) => getEmailWrapper(`
-      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
-        💰 Project Estimation Complete
-      </h2>
-      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        The cost estimation has been completed for this project.
-      </p>
-      ${getInfoBox([
-        { label: 'Project Name', value: data.projectName || 'N/A' },
-        { label: 'Client', value: data.clientName || 'N/A' },
-        { label: 'Estimated Cost', value: data.estimatedCost || 'N/A' }
-      ])}
-      ${getStatusBanner('Review the estimation and proceed with pricing allocation.', 'info')}
-      ${getButton('Review Estimation', DASHBOARD_URL)}
-    `)
-  },
-
-  'pricing.complete': {
-    subject: '💵 Pricing Complete - Approval Required: {{projectName}}',
-    html: (data) => getEmailWrapper(`
-      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
-        💵 Pricing Completed by COO
-      </h2>
-      ${getStatusBanner('Director approval required to proceed with this project.', 'warning')}
-      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        The COO has completed the pricing for this project. Your approval is required before proceeding to the next stage.
-      </p>
-      ${getInfoBox([
-        { label: 'Project Name', value: data.projectName || 'N/A' },
-        { label: 'Client', value: data.clientName || 'N/A' },
-        { label: 'Estimated Cost', value: data.estimatedCost || 'N/A' },
-        { label: 'Proposed Price', value: data.finalPrice || data.proposedPrice || 'N/A' },
-        { label: 'Margin', value: data.margin || 'N/A' },
-        { label: 'Completed By', value: 'COO' }
-      ])}
-      <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        <strong>Action Required:</strong> Please review the pricing details and approve or request revisions.
-      </p>
-      ${getButton('Review & Approve Pricing', DASHBOARD_URL, '#f59e0b')}
-    `, 'Please review and approve at your earliest convenience.')
-  },
-
-  'pricing.allocated': {
-    subject: '💵 Pricing Allocated: {{projectName}}',
-    html: (data) => getEmailWrapper(`
-      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
-        💵 Pricing Allocated
-      </h2>
-      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        Pricing has been allocated for the project.
-      </p>
-      ${getInfoBox([
-        { label: 'Project Name', value: data.projectName || 'N/A' },
-        { label: 'Client', value: data.clientName || 'N/A' },
-        { label: 'Final Price', value: data.finalPrice || 'N/A' }
-      ])}
-      ${getButton('View Details', DASHBOARD_URL)}
-    `)
-  },
-
-  'project.won': {
-    subject: '🎉 Project Won: {{projectName}}',
-    html: (data) => getEmailWrapper(`
-      <h2 style="margin: 0 0 15px 0; color: #22c55e; font-size: 24px;">
-        🎉 Congratulations! Project Won
-      </h2>
-      ${getStatusBanner('Great news! We have won this project.', 'success')}
-      ${getInfoBox([
-        { label: 'Project Name', value: data.projectName || 'N/A' },
-        { label: 'Client', value: data.clientName || 'N/A' },
-        { label: 'Contract Value', value: data.contractValue || 'N/A' }
-      ])}
-      <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        <strong>Next Steps:</strong> COO to proceed with project allocation and team assignment.
-      </p>
-      ${getButton('View Project', DASHBOARD_URL, '#22c55e')}
-    `, 'Time to celebrate and prepare for project kick-off!')
-  },
-
-  'project.allocated': {
-    subject: '👥 New Project Allocated: {{projectName}}',
-    html: (data) => getEmailWrapper(`
-      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
-        👥 New Project Allocated by COO
-      </h2>
-      ${getStatusBanner('A new project has been allocated to you by COO. Designer allocation required.', 'info')}
-      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        The COO has allocated this project to you as Design Manager. Please review the project details and proceed with designer allocation.
-      </p>
-      ${getInfoBox([
-        { label: 'Project Name', value: data.projectName || 'N/A' },
-        { label: 'Client', value: data.clientName || 'N/A' },
-        { label: 'Design Manager', value: data.designManager || data.designLead || 'You' },
-        { label: 'Project Value', value: data.projectValue || data.finalPrice || 'N/A' },
-        { label: 'Start Date', value: data.startDate || 'N/A' },
-        { label: 'Allocated By', value: 'COO' }
-      ])}
-      <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        <strong>Action Required:</strong> Review project requirements and allocate designers to the project team.
-      </p>
-      ${getButton('View Project & Allocate Designers', DASHBOARD_URL)}
-    `, 'Please proceed with designer allocation at your earliest convenience.')
-  },
-
-  'designer.allocated': {
-    subject: '🎨 New Project Assignment: {{projectName}}',
-    html: (data) => getEmailWrapper(`
-      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
-        🎨 You've Been Assigned to a Project
-      </h2>
-      ${getStatusBanner('You have been allocated to a new project by the Design Manager.', 'success')}
-      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        The Design Manager has assigned you to work on this project. Please review the project details and prepare to begin work.
-      </p>
-      ${getInfoBox([
-        { label: 'Project Name', value: data.projectName || 'N/A' },
-        { label: 'Client', value: data.clientName || 'N/A' },
-        { label: 'Your Role', value: data.designerRole || 'Designer' },
-        { label: 'Design Manager', value: data.designManager || data.designLead || 'N/A' },
-        { label: 'Allocated By', value: data.allocatedBy || 'Design Manager' }
-      ])}
-      <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        <strong>Next Steps:</strong> Review project requirements and contact your Design Manager for project briefing and task assignment.
-      </p>
-      ${getButton('View Project Details', DASHBOARD_URL)}
-    `, 'Welcome to the project team!')
-  },
-
-  'variation.allocated': {
-    subject: '🔄 Variation Request: {{projectName}}',
-    html: (data) => getEmailWrapper(`
-      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
-        🔄 New Variation Request
-      </h2>
-      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        A variation has been requested for the following project.
-      </p>
-      ${getInfoBox([
-        { label: 'Project Name', value: data.projectName || 'N/A' },
-        { label: 'Client', value: data.clientName || 'N/A' },
-        { label: 'Variation Type', value: data.variationType || 'N/A' },
-        { label: 'Requested By', value: data.requestedBy || 'N/A' }
-      ])}
-      ${getStatusBanner('Please review and approve or reject this variation request.', 'warning')}
-      ${getButton('Review Variation', DASHBOARD_URL, '#f59e0b')}
-    `)
-  },
-
-  'variation.approved': {
-    subject: '✅ Variation Approved: {{projectName}}',
-    html: (data) => getEmailWrapper(`
-      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
-        ✅ Variation Request Approved
-      </h2>
-      ${getStatusBanner('The variation request has been approved.', 'success')}
-      ${getInfoBox([
-        { label: 'Project Name', value: data.projectName || 'N/A' },
-        { label: 'Client', value: data.clientName || 'N/A' },
-        { label: 'Variation Type', value: data.variationType || 'N/A' },
-        { label: 'Approved By', value: data.approvedBy || 'N/A' }
-      ])}
-      <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        Please proceed with implementing the approved changes.
-      </p>
-      ${getButton('View Details', DASHBOARD_URL)}
-    `)
-  },
-
-  'invoice.saved': {
-    subject: '🧾 Invoice Generated: {{projectName}}',
-    html: (data) => getEmailWrapper(`
-      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
-        🧾 Invoice Generated
-      </h2>
-      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        A new invoice has been generated for the following project.
-      </p>
-      ${getInfoBox([
-        { label: 'Project Name', value: data.projectName || 'N/A' },
-        { label: 'Client', value: data.clientName || 'N/A' },
-        { label: 'Invoice Number', value: data.invoiceNumber || 'N/A' },
-        { label: 'Amount', value: data.invoiceAmount || 'N/A' },
-        { label: 'Date', value: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) }
-      ])}
-      ${getStatusBanner('Invoice is ready for review and dispatch to client.', 'info')}
-      ${getButton('View Invoice', DASHBOARD_URL)}
-    `)
-  },
-
-  'time_request.approved': {
-    subject: '⏰ Time Request Approved: {{projectName}}',
-    html: (data) => getEmailWrapper(`
-      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
-        ⏰ Additional Time Approved
-      </h2>
-      ${getStatusBanner('Your request for additional time has been approved.', 'success')}
-      ${getInfoBox([
-        { label: 'Project Name', value: data.projectName || 'N/A' },
-        { label: 'Additional Hours', value: data.additionalHours || 'N/A' },
-        { label: 'Approved By', value: data.approvedBy || 'N/A' }
-      ])}
-      <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        You may proceed with the additional time allocated to complete your work.
       </p>
       ${getButton('View Project', DASHBOARD_URL)}
     `)
@@ -480,6 +491,21 @@ async function getBDMEmail(projectId, proposalId) {
   return null;
 }
 
+async function getDesignManagerEmail(projectId) {
+  try {
+    if (projectId) {
+      const doc = await db.collection('projects').doc(projectId).get();
+      if (doc.exists && doc.data().designManagerUid) {
+        const userDoc = await db.collection('users').doc(doc.data().designManagerUid).get();
+        if (userDoc.exists) return userDoc.data().email;
+      }
+    }
+  } catch (e) {
+    console.error("⚠️ Error fetching Design Manager email:", e.message);
+  }
+  return null;
+}
+
 function interpolate(template, data) {
   let result = template || '';
   for (const key in data) {
@@ -504,9 +530,12 @@ async function sendEmailNotification(event, data) {
   const roles = EMAIL_RECIPIENT_MAP[event] || [];
   let recipients = await getEmailsForRoles(roles);
 
-  // 2. Dynamic Additions
-  // Add BDM?
-  if (['proposal.created', 'project.submitted', 'project.approved_by_director', 'variation.approved', 'invoice.saved'].includes(event)) {
+  // 2. Dynamic Additions based on event type
+  
+  // Add BDM for relevant events
+  if (['proposal.created', 'project.submitted', 'project.approved_by_director', 
+       'variation.approved', 'variation.approved_detail', 'invoice.saved', 
+       'invoice.created', 'invoice.payment_due', 'invoice.overdue'].includes(event)) {
       let bdmEmail = data.createdByEmail || data.bdmEmail;
       if (!bdmEmail) bdmEmail = await getBDMEmail(data.projectId, data.proposalId);
       
@@ -516,14 +545,21 @@ async function sendEmailNotification(event, data) {
       }
   }
   
-  // Add Design Manager (logged in user who is allocating the project)?
-  if (event === 'project.allocated' && data.designManagerEmail) {
-      recipients.push(data.designManagerEmail);
-      console.log(`👔 Added Design Manager: ${data.designManagerEmail}`);
+  // Add Design Manager for relevant events
+  if (['project.allocated', 'time_request.created', 'time_request.approved', 
+       'time_request.rejected'].includes(event)) {
+      let designManagerEmail = data.designManagerEmail;
+      if (!designManagerEmail) designManagerEmail = await getDesignManagerEmail(data.projectId);
+      
+      if (designManagerEmail) {
+          recipients.push(designManagerEmail);
+          console.log(`👔 Added Design Manager: ${designManagerEmail}`);
+      }
   }
   
-  // Add Designer (when Design Manager allocates)?
-  if (['designer.allocated', 'time_request.approved'].includes(event) && data.designerEmail) {
+  // Add Designer for relevant events
+  if (['designer.allocated', 'time_request.approved', 'time_request.rejected'].includes(event) 
+      && data.designerEmail) {
       recipients.push(data.designerEmail);
       console.log(`🎨 Added Designer: ${data.designerEmail}`);
   }

@@ -18,7 +18,8 @@ const EMAIL_RECIPIENT_MAP = {
   'project.approved_by_director': [], // Dynamic only (BDM)
   'proposal.uploaded': ['estimator'],
   'estimation.complete': ['coo'],
-  'pricing.allocated': ['director'],
+  'pricing.complete': ['director'], // COO completes pricing → Director approves
+  'pricing.allocated': ['director'], // For backwards compatibility
   'project.won': ['coo', 'director'],
   'project.allocated': ['design_lead'], 
   'designer.allocated': [], // Dynamic only (Designer)
@@ -248,6 +249,31 @@ const EMAIL_TEMPLATE_MAP = {
       ${getStatusBanner('Review the estimation and proceed with pricing allocation.', 'info')}
       ${getButton('Review Estimation', DASHBOARD_URL)}
     `)
+  },
+
+  'pricing.complete': {
+    subject: '💵 Pricing Complete - Approval Required: {{projectName}}',
+    html: (data) => getEmailWrapper(`
+      <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
+        💵 Pricing Completed by COO
+      </h2>
+      ${getStatusBanner('Director approval required to proceed with this project.', 'warning')}
+      <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        The COO has completed the pricing for this project. Your approval is required before proceeding to the next stage.
+      </p>
+      ${getInfoBox([
+        { label: 'Project Name', value: data.projectName || 'N/A' },
+        { label: 'Client', value: data.clientName || 'N/A' },
+        { label: 'Estimated Cost', value: data.estimatedCost || 'N/A' },
+        { label: 'Proposed Price', value: data.finalPrice || data.proposedPrice || 'N/A' },
+        { label: 'Margin', value: data.margin || 'N/A' },
+        { label: 'Completed By', value: 'COO' }
+      ])}
+      <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        <strong>Action Required:</strong> Please review the pricing details and approve or request revisions.
+      </p>
+      ${getButton('Review & Approve Pricing', DASHBOARD_URL, '#f59e0b')}
+    `, 'Please review and approve at your earliest convenience.')
   },
 
   'pricing.allocated': {

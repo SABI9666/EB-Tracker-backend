@@ -21,8 +21,8 @@ const EMAIL_RECIPIENT_MAP = {
   'pricing.complete': ['director'], // COO completes pricing → Director approves
   'pricing.allocated': ['director'], // For backwards compatibility
   'project.won': ['coo', 'director'],
-  'project.allocated': ['design_lead', 'designmanager'], // COO allocates → Design Manager
-  'designer.allocated': [], // Dynamic only (Designer)
+  'project.allocated': ['coo'], // COO allocates → Design Manager (+ dynamic Design Manager)
+  'designer.allocated': ['coo'], // Design Manager allocates → Designer (+ dynamic Designer)
   'variation.allocated': ['bdm', 'coo', 'director'],
   'variation.approved': ['bdm', 'coo', 'director', 'design_lead'],
   'invoice.saved': ['bdm', 'coo', 'director']
@@ -319,23 +319,23 @@ const EMAIL_TEMPLATE_MAP = {
       <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
         👥 New Project Allocated by COO
       </h2>
-      ${getStatusBanner('A new project has been allocated and requires your attention for team assignment.', 'info')}
+      ${getStatusBanner('A new project has been allocated to you by COO. Designer allocation required.', 'info')}
       <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        The COO has allocated this project. Please review the project details and proceed with designer allocation.
+        The COO has allocated this project to you as Design Manager. Please review the project details and proceed with designer allocation.
       </p>
       ${getInfoBox([
         { label: 'Project Name', value: data.projectName || 'N/A' },
         { label: 'Client', value: data.clientName || 'N/A' },
-        { label: 'Design Lead', value: data.designLead || data.designManager || 'To be assigned' },
+        { label: 'Design Manager', value: data.designManager || data.designLead || 'You' },
         { label: 'Project Value', value: data.projectValue || data.finalPrice || 'N/A' },
         { label: 'Start Date', value: data.startDate || 'N/A' },
         { label: 'Allocated By', value: 'COO' }
       ])}
       <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        <strong>Next Steps:</strong> Review project requirements and allocate designers to the project team.
+        <strong>Action Required:</strong> Review project requirements and allocate designers to the project team.
       </p>
-      ${getButton('View Project & Allocate Team', DASHBOARD_URL)}
-    `, 'Please proceed with team allocation at your earliest convenience.')
+      ${getButton('View Project & Allocate Designers', DASHBOARD_URL)}
+    `, 'Please proceed with designer allocation at your earliest convenience.')
   },
 
   'designer.allocated': {
@@ -344,18 +344,22 @@ const EMAIL_TEMPLATE_MAP = {
       <h2 style="margin: 0 0 15px 0; color: #1e293b; font-size: 22px;">
         🎨 You've Been Assigned to a Project
       </h2>
+      ${getStatusBanner('You have been allocated to a new project by the Design Manager.', 'success')}
       <p style="margin: 0 0 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
-        You have been assigned as a designer for the following project.
+        The Design Manager has assigned you to work on this project. Please review the project details and prepare to begin work.
       </p>
       ${getInfoBox([
         { label: 'Project Name', value: data.projectName || 'N/A' },
         { label: 'Client', value: data.clientName || 'N/A' },
         { label: 'Your Role', value: data.designerRole || 'Designer' },
-        { label: 'Design Lead', value: data.designLead || 'N/A' }
+        { label: 'Design Manager', value: data.designManager || data.designLead || 'N/A' },
+        { label: 'Allocated By', value: data.allocatedBy || 'Design Manager' }
       ])}
-      ${getStatusBanner('Please review project details and contact your design lead for briefing.', 'info')}
-      ${getButton('View Project', DASHBOARD_URL)}
-    `)
+      <p style="margin: 20px 0; color: #475569; font-size: 15px; line-height: 1.6;">
+        <strong>Next Steps:</strong> Review project requirements and contact your Design Manager for project briefing and task assignment.
+      </p>
+      ${getButton('View Project Details', DASHBOARD_URL)}
+    `, 'Welcome to the project team!')
   },
 
   'variation.allocated': {
@@ -511,7 +515,14 @@ async function sendEmailNotification(event, data) {
           console.log(`👤 Added BDM: ${bdmEmail}`);
       }
   }
-  // Add Designer?
+  
+  // Add Design Manager (logged in user who is allocating the project)?
+  if (event === 'project.allocated' && data.designManagerEmail) {
+      recipients.push(data.designManagerEmail);
+      console.log(`👔 Added Design Manager: ${data.designManagerEmail}`);
+  }
+  
+  // Add Designer (when Design Manager allocates)?
   if (['designer.allocated', 'time_request.approved'].includes(event) && data.designerEmail) {
       recipients.push(data.designerEmail);
       console.log(`🎨 Added Designer: ${data.designerEmail}`);

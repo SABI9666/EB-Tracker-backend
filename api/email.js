@@ -228,61 +228,67 @@ function interpolate(template, data) {
 // MAIN SEND FUNCTION (Exported)
 // ==========================================
 async function sendEmailNotification(event, data) {
-  if (!event) throw new Error('Event required');
+  if (!event) {
+      console.error('❌ Email Error: Event required');
+      return { success: false, error: 'Event required' };
+  }
+  
   console.log(`📧 Processing Email Event: [${event}]`);
 
-  // 1. Get Fixed Recipients based on Role Map
+  if (!process.env.RESEND_API_KEY) {
+      console.error('❌ CRITICAL: RESEND_API_KEY is missing in environment variables');
+      return { success: false, error: 'Server misconfiguration: Missing Email API Key' };
+  }
+
+  // 1. Get recipients (Roles + Dynamic)
   const roles = EMAIL_RECIPIENT_MAP[event] || [];
   let recipients = await getEmailsForRoles(roles);
 
-  // 2. Add Dynamic Recipients (The "THAT PROJECT BDM" logic)
-  
-  // -> Add BDM for specific events
   if (['proposal.created', 'variation.approved', 'invoice.saved'].includes(event)) {
-      // Try to get BDM email from data payload first, then fallback to DB lookup
       let bdmEmail = data.bdmEmail;
       if (!bdmEmail && (data.projectId || data.proposalId)) {
           bdmEmail = await getBDMEmail(data.projectId, data.proposalId);
       }
-      if (bdmEmail) {
-          recipients.push(bdmEmail);
-          console.log(`   -> Added BDM: ${bdmEmail}`);
-      }
+      if (bdmEmail) recipients.push(bdmEmail);
   }
 
-  // -> Add specific Designer for time approval
   if (event === 'time_request.approved' && data.designerEmail) {
       recipients.push(data.designerEmail);
-       console.log(`   -> Added Designer: ${data.designerEmail}`);
   }
 
-  // 3. Clean recipient list
-  recipients = [...new Set(recipients.filter(e => e && e.includes('@')))];
+  // Deduplicate and validate
+  recipients = [...new Set(recipients.filter(e => e && e.includes('@') && e.trim() !== ''))];
   
   if (recipients.length === 0) {
-      console.log('   -> No recipients found. Skipping email.');
-      return { success: false, message: 'No recipients' };
+      console.warn('⚠️ No valid recipients found. Skipping email.');
+      return { success: false, message: 'No valid recipients found' };
   }
 
-  // 4. Prepare Content
+  // 2. Prepare Content
   const tmpl = EMAIL_TEMPLATE_MAP[event] || EMAIL_TEMPLATE_MAP['default'];
   const html = interpolate(tmpl.html, data);
   const subject = interpolate(tmpl.subject, data);
 
-  // 5. Send via Resend
+  // 3. Send via Resend
   try {
-    const fromEmail = 'notifications@edanbrook.com'; // MUST be verified in Resend
-    await resend.emails.send({
+    // ✅ UPDATED: Send from sabin@edanbrook.com
+    const fromEmail = 'sabin@edanbrook.com'; 
+    
+    const data = await resend.emails.send({
       from: `EB-Tracker <${fromEmail}>`,
       to: recipients,
       subject: subject,
       html: html
     });
-    console.log(`   -> ✅ Sent to ${recipients.length} recipients.`);
-    return { success: true, recipientCount: recipients.length };
+
+    if (data.error) {
+        throw new Error(data.error.message);
+    }
+
+    console.log(`✅ Email sent successfully to ${recipients.length} recipients. ID: ${data.data?.id}`);
+    return { success: true, recipientCount: recipients.length, id: data.data?.id };
   } catch (error) {
-    console.error('   -> ❌ Resend API Error:', error.message);
-    // Don't crash the main app if email fails
+    console.error('❌ RESEND API ERROR:', error.message);
     return { success: false, error: error.message };
   }
 }

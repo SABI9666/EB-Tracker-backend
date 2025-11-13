@@ -276,22 +276,30 @@ const handler = async (req, res) => {
                     activityDetail = `Project links added`;
                     break;
                     
+                // ====================== THIS IS THE FIXED BLOCK ======================
                 case 'add_estimation':
                     if (!['estimator', 'coo'].includes(req.user.role)) {
                         return res.status(403).json({ success: false, error: 'Only Estimator or COO can add estimation' });
                     }
+                    
+                    // The 'data' object IS the estimation object.
+                    // We just need to add the server-side fields to it.
                     updates = {
                         estimation: {
-                            manhours: data.manhours || 0,
-                            boqUploaded: data.boqUploaded || false,
+                            ...data, // This copies all fields: tonnage, totalHours, manhours, services, etc.
+                            
+                            // Add/overwrite with server-side data
                             estimatorName: req.user.name,
                             estimatorUid: req.user.uid,
                             estimatedAt: new Date().toISOString(),
-                            notes: data.notes || ''
+                            boqUploaded: data.boqUploaded || false
                         },
                         status: 'estimation_complete'
                     };
-                    activityDetail = `Estimation completed: ${data.manhours} manhours`;
+                    // Use the correct field for the activity log
+                    activityDetail = `Estimation completed: ${data.totalHours || data.manhours || 0} manhours`;
+                    // =================================================================
+                    
                     await db.collection('notifications').add({
                         type: 'estimation_complete',
                         recipientRole: 'coo',
@@ -559,7 +567,7 @@ const handler = async (req, res) => {
                     break;
                     
                 default:
-                    return res.status(400).json({ success: false, error: 'Invalid action: ' + action });
+                    return res.status(4ci00).json({ success: false, error: 'Invalid action: ' + action });
             }
             
             updates.changeLog = admin.firestore.FieldValue.arrayUnion({ 

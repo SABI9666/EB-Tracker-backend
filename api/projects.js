@@ -215,8 +215,9 @@ const handler = async (req, res) => {
                     totalAllocatedHours: 0,
                     hoursLogged: 0,
                     
-                    // Get estimated hours from proposal if available
+                    // Get estimated hours from proposal if available (This is your budget)
                     estimatedHours: proposal.estimation?.totalHours || 0,
+                    remainingHours: proposal.estimation?.totalHours || 0, // Initialize remaining hours
                     
                     createdAt: admin.firestore.FieldValue.serverTimestamp(),
                     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -320,7 +321,10 @@ const handler = async (req, res) => {
                     });
                 }
                 
-                if (!totalAllocatedHours || totalAllocatedHours <= 0) {
+                // totalAllocatedHours comes from frontend (previous + current session hours)
+                const finalTotalAllocatedHours = parseFloat(totalAllocatedHours) || 0;
+                
+                if (finalTotalAllocatedHours <= 0) {
                     return res.status(400).json({
                         success: false,
                         error: 'Total allocated hours must be greater than 0'
@@ -375,7 +379,11 @@ const handler = async (req, res) => {
                     assignedDesignerUids: assignedDesignerUids,
                     assignedDesignerNames: assignedDesignerNames,
                     designerHours: designerHours,
-                    totalAllocatedHours: totalAllocatedHours,
+                    totalAllocatedHours: finalTotalAllocatedHours,
+                    
+                    // 🚨 CRITICAL FIX: Calculate and save the remaining hours
+                    // Assumes total project budget is in project.estimatedHours
+                    remainingHours: project.estimatedHours - finalTotalAllocatedHours,
                     
                     // Store complete designer allocation details
                     designerAllocations: designerAllocations,
@@ -396,7 +404,7 @@ const handler = async (req, res) => {
                     hoursLogged: 0
                 };
                 
-                activityDetail = `Project allocated to ${validatedDesigners.length} designer(s) with ${totalAllocatedHours} total hours by ${req.user.name}`;
+                activityDetail = `Project allocated to ${validatedDesigners.length} designer(s) with ${finalTotalAllocatedHours} total hours by ${req.user.name}`;
                 
                 // Send notifications and emails to each designer
                 for (const designer of validatedDesigners) {
@@ -528,7 +536,9 @@ const handler = async (req, res) => {
                     status: 'assigned',
                     designStatus: 'allocated',
                     maxAllocatedHours: maxAllocatedHours,
-                    additionalHours: parseFloat(data.additionalHours || 0)
+                    additionalHours: parseFloat(data.additionalHours || 0),
+                    // Update remaining hours based on this single allocation
+                    remainingHours: project.estimatedHours - maxAllocatedHours - parseFloat(data.additionalHours || 0)
                 };
                 
                 activityDetail = `Project allocated to Design Lead: ${designLeadData.name} by ${req.user.name} with ${maxAllocatedHours} hours.`;
@@ -625,6 +635,8 @@ const handler = async (req, res) => {
                     assignedDesignerNames: data.assignedDesignerNames || [designerData.name],
                     designerHours: data.designerHours || { [designerUid]: estimatedHours },
                     totalAllocatedHours: estimatedHours,
+                    // Update remaining hours based on this single allocation
+                    remainingHours: project.estimatedHours - estimatedHours,
                     allocationDate: admin.firestore.FieldValue.serverTimestamp(),
                     allocatedBy: req.user.name,
                     allocatedByUid: req.user.uid,

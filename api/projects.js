@@ -118,8 +118,57 @@ const handler = async (req, res) => {
                 });
             }
             
-            // Get all projects (with optional status filter)
-            let query = db.collection('projects').orderBy('createdAt', 'desc');
+            // Get all projects (with optional filters)
+            let query = db.collection('projects');
+            
+            // Handle assignedToMe filter for designers
+            const assignedToMe = req.query.assignedToMe;
+            if (assignedToMe === 'true') {
+                // Get projects where the current user is in assignedDesignerUids array
+                // or where they are the designLeadUid
+                const userUid = req.user.uid;
+                
+                // Firestore doesn't support OR queries directly, so we need to make two queries
+                const assignedSnapshot = await db.collection('projects')
+                    .where('assignedDesignerUids', 'array-contains', userUid)
+                    .orderBy('createdAt', 'desc')
+                    .get();
+                
+                const leadSnapshot = await db.collection('projects')
+                    .where('designLeadUid', '==', userUid)
+                    .orderBy('createdAt', 'desc')
+                    .get();
+                
+                // Combine and deduplicate results
+                const projectsMap = new Map();
+                
+                assignedSnapshot.docs.forEach(doc => {
+                    projectsMap.set(doc.id, { id: doc.id, ...doc.data() });
+                });
+                
+                leadSnapshot.docs.forEach(doc => {
+                    if (!projectsMap.has(doc.id)) {
+                        projectsMap.set(doc.id, { id: doc.id, ...doc.data() });
+                    }
+                });
+                
+                const projects = Array.from(projectsMap.values());
+                
+                // Sort by createdAt descending
+                projects.sort((a, b) => {
+                    const dateA = a.createdAt?._seconds || 0;
+                    const dateB = b.createdAt?._seconds || 0;
+                    return dateB - dateA;
+                });
+                
+                return res.status(200).json({ 
+                    success: true, 
+                    data: projects 
+                });
+            }
+            
+            // Standard query with optional status filter
+            query = query.orderBy('createdAt', 'desc');
             
             if (status) {
                 query = query.where('status', '==', status);
@@ -467,132 +516,7 @@ const handler = async (req, res) => {
             }
             
             // ============================================
-            // Single Designer/Design Lead Allocation
-            // ============================================
-            else if (action === 'allocate_to_design_lead' || action === 'allocate_design_lead') {
-                // Only COO or Director can allocate
-                if (!['coo', 'director'].includes(req.user.role)) {
-                    return res.status(403).json({ 
-                        success: false, 
-                        error: 'Only COO or Director can allocate projects to Design Leads' 
-                    });
-                }
-                
-                // Validate the Design Lead UID from database
-                const designLeadUid = data.designLeadUid;
-                if (!designLeadUid) {
-                    return res.status(400).json({ 
-                        success: false, 
-                        error: 'Design Lead UID is required' 
-                    });
-                }
-                
-                // Validate allocation notes - REQUIRED field
-                if (!data.allocationNotes || data.allocationNotes.trim() === '') {
-                    return res.status(400).json({ 
-                        success: false, 
-                        error: 'Allocation notes are required' 
-                    });
-                }
-                
-                // Fetch actual user from database to validate
-                const designLeadDoc = await db.collection('users').doc(designLeadUid).get();
-                if (!designLeadDoc.exists) {
-                    return res.status(404).json({ 
-                        success: false, 
-                        error: 'Design Lead user not found' 
-                    });
-                }
-                
-                const designLeadData = designLeadDoc.data();
-                if (designLeadData.role !== 'design_lead') {
-                    return res.status(400).json({ 
-                        success: false, 
-                        error: 'Selected user is not a Design Lead' 
-                    });
-                }
-                
-                const maxAllocatedHours = parseFloat(data.maxAllocatedHours || 0);
-                if (maxAllocatedHours <= 0) {
-                     return res.status(400).json({ 
-                        success: false, 
-                        error: 'Max Allocated Hours must be greater than 0' 
-                    });
-                }
-                
-                // Update project with actual Design Lead info
-                updates = {
-                    designLeadName: designLeadData.name,
-                    designLeadUid: designLeadUid,
-                    designLeadEmail: designLeadData.email,
-                    allocationDate: admin.firestore.FieldValue.serverTimestamp(),
-                    allocatedBy: req.user.name,
-                    allocatedByUid: req.user.uid,
-                    projectStartDate: data.projectStartDate || admin.firestore.FieldValue.serverTimestamp(),
-                    targetCompletionDate: data.targetCompletionDate || null,
-                    allocationNotes: data.allocationNotes || '',
-                    specialInstructions: data.specialInstructions || '',
-                    priority: data.priority || 'Normal',
-                    status: 'assigned',
-                    designStatus: 'allocated',
-                    maxAllocatedHours: maxAllocatedHours,
-                    additionalHours: parseFloat(data.additionalHours || 0),
-                    // Update remaining hours based on this single allocation
-                    remainingHours: project.estimatedHours - maxAllocatedHours - parseFloat(data.additionalHours || 0)
-                };
-                
-                activityDetail = `Project allocated to Design Lead: ${designLeadData.name} by ${req.user.name} with ${maxAllocatedHours} hours.`;
-                
-                // Notify the Design Lead
-                notifications.push({
-                    type: 'project_allocated',
-                    recipientUid: designLeadUid,
-                    recipientRole: 'design_lead',
-                    message: `New project allocated: "${project.projectName}" (${maxAllocatedHours} hours)`,
-                    projectId: id,
-                    projectName: project.projectName,
-                    clientCompany: project.clientCompany,
-                    allocatedBy: req.user.name,
-                    priority: 'high'
-                });
-                
-                // Notify BDM about allocation
-                if (project.bdmUid) {
-                    notifications.push({
-                        type: 'project_allocated',
-                        recipientUid: project.bdmUid,
-                        recipientRole: 'bdm',
-                        message: `Project "${project.projectName}" has been allocated to ${designLeadData.name}`,
-                        projectId: id,
-                        priority: 'normal'
-                    });
-                }
-                
-                // Send email notification
-                console.log('\n📧 Sending project allocation email...');
-                try {
-                    const emailResult = await sendEmailNotification('project.allocated', {
-                        projectName: project.projectName || 'Project',
-                        clientName: project.clientCompany || project.clientName || 'Client',
-                        designManagerEmail: designLeadData.email,
-                        designManager: designLeadData.name,
-                        projectValue: project.quoteValue || 'N/A',
-                        startDate: data.projectStartDate ? new Date(data.projectStartDate).toLocaleDateString() : 'TBD',
-                        projectId: id
-                    });
-                    
-                    if (emailResult.success) {
-                        console.log(`✅ Email sent to ${emailResult.recipients} recipients`);
-                    } else {
-                        console.error('⚠️ Email failed:', emailResult.error);
-                    }
-                } catch (emailError) {
-                    console.error('❌ Email error:', emailError);
-                }
-            } 
-            
-            // ============================================
-            // Direct Designer Allocation (from COO)
+            // Direct Designer Allocation (from COO) - Single Designer
             // ============================================
             else if (action === 'allocate_directly_to_designer') {
                 // Only COO or Director can allocate
@@ -665,21 +589,14 @@ const handler = async (req, res) => {
             }
             
             // ============================================
-            // Design Lead Assigning Designers
+            // Assign Designers (COO/Director Only)
             // ============================================
             else if (action === 'assign_designers') {
-                // Only Design Lead (who is allocated) or COO/Director can assign designers
-                if (req.user.role === 'design_lead' && project.designLeadUid !== req.user.uid) {
+                // Only COO or Director can assign designers
+                if (!['coo', 'director'].includes(req.user.role)) {
                     return res.status(403).json({ 
                         success: false, 
-                        error: 'You are not the allocated Design Lead for this project' 
-                    });
-                }
-                
-                if (!['design_lead', 'coo', 'director'].includes(req.user.role)) {
-                    return res.status(403).json({ 
-                        success: false, 
-                        error: 'Only Design Lead, COO, or Director can assign designers' 
+                        error: 'Only COO or Director can assign designers' 
                     });
                 }
                 
@@ -759,7 +676,6 @@ const handler = async (req, res) => {
                             clientName: project.clientCompany || project.clientName || 'Client',
                             designerEmail: designerEmail,
                             designerRole: 'Designer',
-                            designManager: project.designLeadName || req.user.name,
                             allocatedBy: req.user.name,
                             projectId: id
                         });
@@ -792,21 +708,155 @@ const handler = async (req, res) => {
             }
 
             // ============================================
-            // Mark Project Complete
+            // Continue Allocation - Add more designers to partially allocated project
             // ============================================
-            else if (action === 'mark_complete') {
-                // Only allocated Design Lead, COO, or Director can complete
-                if (req.user.role === 'design_lead' && project.designLeadUid !== req.user.uid) {
+            else if (action === 'continue_allocation') {
+                console.log('🔄 Continue allocation - adding more designers');
+                
+                // Only COO or Director can continue allocation
+                if (!['coo', 'director'].includes(req.user.role)) {
                     return res.status(403).json({ 
                         success: false, 
-                        error: 'You are not the allocated Design Lead for this project' 
+                        error: 'Only COO or Director can continue project allocation' 
                     });
                 }
                 
-                if (!['design_lead', 'coo', 'director'].includes(req.user.role)) {
+                const { newAllocations, additionalHours } = data;
+                
+                if (!newAllocations || newAllocations.length === 0) {
+                    return res.status(400).json({
+                        success: false,
+                        error: 'At least one new designer allocation is required'
+                    });
+                }
+                
+                // Get existing allocations
+                const existingAllocations = project.designerAllocations || [];
+                const existingDesignerUids = project.assignedDesignerUids || [];
+                const existingDesignerNames = project.assignedDesignerNames || [];
+                const existingDesignerHours = project.designerHours || {};
+                const currentTotalHours = parseFloat(project.totalAllocatedHours) || 0;
+                
+                // Validate and process new allocations
+                const validatedNewAllocations = [];
+                for (const allocation of newAllocations) {
+                    const userDoc = await db.collection('users').doc(allocation.designerUid).get();
+                    
+                    if (!userDoc.exists) {
+                        return res.status(400).json({
+                            success: false,
+                            error: `Designer not found: ${allocation.designerName}`
+                        });
+                    }
+                    
+                    const userData = userDoc.data();
+                    if (!['designer', 'design_lead'].includes(userData.role)) {
+                        return res.status(400).json({
+                            success: false,
+                            error: `User ${userData.name} is not a designer or design lead`
+                        });
+                    }
+                    
+                    validatedNewAllocations.push({
+                        uid: allocation.designerUid,
+                        name: userData.name,
+                        email: userData.email,
+                        allocatedHours: parseFloat(allocation.allocatedHours) || 0,
+                        specificNotes: allocation.specificNotes || ''
+                    });
+                }
+                
+                // Merge new allocations with existing
+                const mergedDesignerUids = [...existingDesignerUids];
+                const mergedDesignerNames = [...existingDesignerNames];
+                const mergedDesignerHours = { ...existingDesignerHours };
+                const mergedAllocations = [...existingAllocations];
+                
+                for (const newAlloc of validatedNewAllocations) {
+                    if (!mergedDesignerUids.includes(newAlloc.uid)) {
+                        mergedDesignerUids.push(newAlloc.uid);
+                        mergedDesignerNames.push(newAlloc.name);
+                    }
+                    // Add or update hours
+                    mergedDesignerHours[newAlloc.uid] = (mergedDesignerHours[newAlloc.uid] || 0) + newAlloc.allocatedHours;
+                    mergedAllocations.push({
+                        designerUid: newAlloc.uid,
+                        designerName: newAlloc.name,
+                        designerEmail: newAlloc.email,
+                        allocatedHours: newAlloc.allocatedHours,
+                        specificNotes: newAlloc.specificNotes,
+                        allocatedAt: new Date().toISOString()
+                    });
+                }
+                
+                const newTotalHours = currentTotalHours + parseFloat(additionalHours);
+                
+                updates = {
+                    assignedDesignerUids: mergedDesignerUids,
+                    assignedDesignerNames: mergedDesignerNames,
+                    designerHours: mergedDesignerHours,
+                    designerAllocations: mergedAllocations,
+                    totalAllocatedHours: newTotalHours,
+                    remainingHours: (project.estimatedHours || 0) - newTotalHours,
+                    lastAllocationUpdate: admin.firestore.FieldValue.serverTimestamp(),
+                    lastAllocatedBy: req.user.name,
+                    lastAllocatedByUid: req.user.uid
+                };
+                
+                activityDetail = `Additional allocation: ${validatedNewAllocations.length} designer(s) added with ${additionalHours} hours by ${req.user.name}. New total: ${newTotalHours} hours.`;
+                
+                // Send notifications to new designers
+                for (const designer of validatedNewAllocations) {
+                    notifications.push({
+                        type: 'project_allocated_additional',
+                        recipientUid: designer.uid,
+                        recipientRole: 'designer',
+                        message: `Additional allocation: "${project.projectName}" (${designer.allocatedHours} hours)`,
+                        projectId: id,
+                        projectName: project.projectName,
+                        clientCompany: project.clientCompany,
+                        allocatedBy: req.user.name,
+                        allocatedHours: designer.allocatedHours,
+                        priority: 'high'
+                    });
+                    
+                    // Send email notification
+                    console.log(`\n📧 Sending additional allocation email to ${designer.name}...`);
+                    try {
+                        const emailResult = await sendEmailNotification('project.allocated_designer', {
+                            projectName: project.projectName || 'Project',
+                            projectNumber: project.projectNumber || project.projectCode || 'N/A',
+                            clientName: project.clientCompany || 'Client',
+                            designerEmail: designer.email,
+                            designerName: designer.name,
+                            allocatedHours: designer.allocatedHours,
+                            specificNotes: designer.specificNotes,
+                            allocatedBy: req.user.name,
+                            projectId: id
+                        });
+                        
+                        if (emailResult.success) {
+                            console.log(`✅ Email sent to ${designer.name}`);
+                        } else {
+                            console.error('⚠️ Email failed:', emailResult.error);
+                        }
+                    } catch (emailError) {
+                        console.error('❌ Email error for', designer.name, ':', emailError);
+                    }
+                }
+                
+                console.log('✅ Continue allocation completed:', validatedNewAllocations.length, 'new designers');
+            }
+
+            // ============================================
+            // Mark Project Complete (COO/Director Only)
+            // ============================================
+            else if (action === 'mark_complete') {
+                // Only COO or Director can mark projects complete
+                if (!['coo', 'director'].includes(req.user.role)) {
                     return res.status(403).json({ 
                         success: false, 
-                        error: 'Only the Design Lead, COO, or Director can complete this project' 
+                        error: 'Only COO or Director can mark projects as complete' 
                     });
                 }
                 

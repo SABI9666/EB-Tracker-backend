@@ -83,10 +83,23 @@ async function canAccessFile(file, userRole, userUid, proposalId = null) {
     return false;
 }
 
-async function filterFilesForUser(files, userRole, userUid) {
+async function filterFilesForUser(files, userRole, userUid, alreadyValidated = false) {
     const filteredFiles = [];
     for (const file of files) {
-        if (await canAccessFile(file, userRole, userUid)) {
+        // If access was already validated at query level (for designer/design_lead with proposalId)
+        // just add all non-estimation files
+        if (alreadyValidated) {
+            // Skip estimation files for designers
+            if (file.fileType === 'estimation' && !['estimator', 'coo', 'director'].includes(userRole)) {
+                continue;
+            }
+            filteredFiles.push({
+                ...file,
+                canView: true,
+                canDownload: true,
+                canDelete: file.uploadedByUid === userUid || userRole === 'director'
+            });
+        } else if (await canAccessFile(file, userRole, userUid)) {
             filteredFiles.push({
                 ...file,
                 canView: true,
@@ -249,12 +262,48 @@ const handler = async (req, res) => {
             
             let query = db.collection('files').orderBy('uploadedAt', 'desc');
             if (proposalId) {
-                 if (req.user.role === 'bdm') {
+                // Check access based on role
+                if (req.user.role === 'bdm') {
                     const proposalDoc = await db.collection('proposals').doc(proposalId).get();
                     if (!proposalDoc.exists || proposalDoc.data().createdByUid !== req.user.uid) {
                         return res.status(403).json({ success: false, error: 'Access denied to this proposal.' });
                     }
+                } else if (req.user.role === 'designer' || req.user.role === 'design_lead') {
+                    // Designers and design leads need to verify they're assigned to the project
+                    const proposalDoc = await db.collection('proposals').doc(proposalId).get();
+                    if (!proposalDoc.exists) {
+                        return res.status(404).json({ success: false, error: 'Proposal not found.' });
+                    }
+                    const proposal = proposalDoc.data();
+                    
+                    // Check if proposal has a project
+                    if (!proposal.projectId && !proposal.projectCreated) {
+                        return res.status(403).json({ success: false, error: 'No project linked to this proposal.' });
+                    }
+                    
+                    // Get the project to verify access
+                    const projectId = proposal.projectId;
+                    if (projectId) {
+                        const projectDoc = await db.collection('projects').doc(projectId).get();
+                        if (projectDoc.exists) {
+                            const project = projectDoc.data();
+                            let hasAccess = false;
+                            
+                            if (req.user.role === 'design_lead' && project.designLeadUid === req.user.uid) {
+                                hasAccess = true;
+                            }
+                            if (req.user.role === 'designer' && project.assignedDesignerUids && project.assignedDesignerUids.includes(req.user.uid)) {
+                                hasAccess = true;
+                            }
+                            
+                            if (!hasAccess) {
+                                return res.status(403).json({ success: false, error: 'You are not assigned to this project.' });
+                            }
+                        }
+                    }
                 }
+                // COO, Director, Estimator have full access - no check needed
+                
                 query = query.where('proposalId', '==', proposalId);
             } else if (req.user.role === 'bdm') {
                 const proposalsSnapshot = await db.collection('proposals').where('createdByUid', '==', req.user.uid).get();
@@ -265,7 +314,10 @@ const handler = async (req, res) => {
             
             const snapshot = await query.get();
             const allFiles = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            const filteredFiles = await filterFilesForUser(allFiles, req.user.role, req.user.uid);
+            
+            // If we've already validated access (designer/design_lead with proposalId), pass true
+            const alreadyValidated = proposalId && ['designer', 'design_lead', 'coo', 'director', 'estimator'].includes(req.user.role);
+            const filteredFiles = await filterFilesForUser(allFiles, req.user.role, req.user.uid, alreadyValidated);
             return res.status(200).json({ success: true, data: filteredFiles });
         }
 
@@ -392,3 +444,7 @@ const handler = async (req, res) => {
 };
 
 module.exports = allowCors(handler);
+
+
+
+

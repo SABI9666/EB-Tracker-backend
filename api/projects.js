@@ -712,20 +712,34 @@ const handler = async (req, res) => {
                     maxHoursSource: maxHoursSource,                  // LOCK THE SOURCE
                     totalAllocatedHours: parseFloat(totalAllocatedHours), // NEW TOTAL USAGE
                     allocationStatus: allocStatus,                   // ✅ STATUS TRACKING
-                    allocationStatus: allocStatus, 
-                    // *******************************************
                     
                     designerHours: existingDesignerHours,
                     assignedDesignerUids: Array.from(existingAssignedUids),
                     assignedDesignerNames: Array.from(existingAssignedNames),
                     assignedDesignerEmails: Array.from(existingDesignerEmails),
                     
-                    targetCompletionDate: targetCompletionDate || project.targetCompletionDate,
-                    priority: priority || project.priority,
-                    allocationNotes: allocationNotes || project.allocationNotes,
                     status: 'in_progress', // Set global project status
                     designStatus: 'in_progress',
                 };
+                
+                // ✅ FIX: Only add optional fields if they have valid values (not undefined)
+                if (targetCompletionDate) {
+                    updates.targetCompletionDate = targetCompletionDate;
+                } else if (!project.targetCompletionDate) {
+                    updates.targetCompletionDate = null;
+                }
+                
+                if (priority) {
+                    updates.priority = priority;
+                } else if (!project.priority) {
+                    updates.priority = 'medium';
+                }
+                
+                if (allocationNotes) {
+                    updates.allocationNotes = allocationNotes;
+                } else if (!project.allocationNotes) {
+                    updates.allocationNotes = '';
+                }
                 
                 // Set initial allocation metadata if this is the first allocation
                 // Check if totalAllocatedHours was 0 before this update
@@ -750,7 +764,11 @@ const handler = async (req, res) => {
             
             // Apply updates
             updates.updatedAt = admin.firestore.FieldValue.serverTimestamp();
-            await projectRef.update(updates);
+            
+            // ✅ FIX: Sanitize to remove any undefined values before Firestore
+            const sanitizedUpdates = sanitizeForFirestore(updates);
+            
+            await projectRef.update(sanitizedUpdates);
             
             // Log activity
             await db.collection('activities').add({

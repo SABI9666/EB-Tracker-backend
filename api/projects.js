@@ -125,28 +125,29 @@ const handler = async (req, res) => {
             const assignedToMe = req.query.assignedToMe;
             if (assignedToMe === 'true') {
                 // Get projects where the current user is in assignedDesignerUids array
-                // or where they are the designLeadUid
+                // or in assignedDesigners array (legacy support)
                 const userUid = req.user.uid;
                 
-                // Firestore doesn't support OR queries directly, so we need to make two queries
-                const assignedSnapshot = await db.collection('projects')
+                // Query 1: Check assignedDesignerUids array (new format)
+                const assignedUidsSnapshot = await db.collection('projects')
                     .where('assignedDesignerUids', 'array-contains', userUid)
                     .orderBy('createdAt', 'desc')
                     .get();
                 
-                const leadSnapshot = await db.collection('projects')
-                    .where('designLeadUid', '==', userUid)
+                // Query 2: Check assignedDesigners array (legacy format)
+                const assignedLegacySnapshot = await db.collection('projects')
+                    .where('assignedDesigners', 'array-contains', userUid)
                     .orderBy('createdAt', 'desc')
                     .get();
                 
                 // Combine and deduplicate results
                 const projectsMap = new Map();
                 
-                assignedSnapshot.docs.forEach(doc => {
+                assignedUidsSnapshot.docs.forEach(doc => {
                     projectsMap.set(doc.id, { id: doc.id, ...doc.data() });
                 });
                 
-                leadSnapshot.docs.forEach(doc => {
+                assignedLegacySnapshot.docs.forEach(doc => {
                     if (!projectsMap.has(doc.id)) {
                         projectsMap.set(doc.id, { id: doc.id, ...doc.data() });
                     }

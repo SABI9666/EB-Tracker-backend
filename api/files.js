@@ -35,16 +35,40 @@ async function canAccessFile(file, userRole, userUid, proposalId = null) {
         if (proposalDoc.exists) proposal = proposalDoc.data();
     }
     
+    // BDM can only access their own proposals' files
     if (userRole === 'bdm') {
         if (!proposal || proposal.createdByUid !== userUid) return false;
     }
 
+    // If file has no proposalId, allow non-BDM users
     if (!file.proposalId && !proposalId) return userRole !== 'bdm';
 
+    // For project files, links, or files without type - allow access for most roles
     if (!file.fileType || file.fileType === 'project' || file.fileType === 'link') {
-        return userRole !== 'bdm' || (proposal && proposal.createdByUid === userUid);
+        // COO, Director, Estimator can always access
+        if (['coo', 'director', 'estimator'].includes(userRole)) return true;
+        
+        // Designer and Design Lead need to check if they're assigned to the project
+        if (['designer', 'design_lead'].includes(userRole) && proposal && proposal.projectId) {
+            const projectDoc = await db.collection('projects').doc(proposal.projectId).get();
+            if (projectDoc.exists) {
+                const project = projectDoc.data();
+                // Design lead check
+                if (userRole === 'design_lead' && project.designLeadUid === userUid) return true;
+                // Designer check - must be in assignedDesignerUids array
+                if (userRole === 'designer' && project.assignedDesignerUids && project.assignedDesignerUids.includes(userUid)) return true;
+            }
+        }
+        
+        // BDM can access if it's their proposal
+        if (userRole === 'bdm') {
+            return proposal && proposal.createdByUid === userUid;
+        }
+        
+        return false;
     }
 
+    // For estimation files - restricted access
     if (file.fileType === 'estimation') {
         if (['estimator', 'coo', 'director'].includes(userRole)) return true;
         if (userRole === 'bdm') {
@@ -52,7 +76,10 @@ async function canAccessFile(file, userRole, userUid, proposalId = null) {
             return (proposal.createdByUid === userUid) && 
                    (proposalStatus === 'approved' || proposalStatus === 'submitted_to_client');
         }
+        // Designers and design leads generally don't access estimation files
+        return false;
     }
+    
     return false;
 }
 
@@ -365,7 +392,3 @@ const handler = async (req, res) => {
 };
 
 module.exports = allowCors(handler);
-
-
-
-

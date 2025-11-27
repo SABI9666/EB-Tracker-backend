@@ -1,4 +1,4 @@
-// api/files.js
+// api/files.js - FIXED: CommonJS syntax for Node.js/Render
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
@@ -7,19 +7,11 @@ const multer = require('multer');
 const db = admin.firestore();
 const bucket = admin.storage().bucket();
 
-// 1. CRITICAL: Disable default body parser so Multer can read the file stream
-// This is required for Next.js / Vercel serverless functions
-export const config = {
-    api: {
-        bodyParser: false,
-    },
-};
-
 // Configure multer for memory storage
 const upload = multer({ 
     storage: multer.memoryStorage(),
     limits: { 
-        fileSize: 50 * 1024 * 1024 // 50MB limit (Adjust as needed, keeping it reasonable for serverless)
+        fileSize: 50 * 1024 * 1024 // 50MB limit
     }
 });
 
@@ -51,24 +43,29 @@ async function canAccessFile(file, userRole, userUid, proposalId = null) {
     
     // 2. BDM Access: Can only see their own proposals
     if (userRole === 'bdm') {
-        // If file belongs to a proposal, check BDM ownership
         if (proposal) return proposal.createdByUid === userUid;
-        // If file is orphaned but uploaded by this BDM
         return file.uploadedByUid === userUid;
     }
 
     // 3. Designer/Lead Access
     if (['design_lead', 'designer'].includes(userRole)) {
-        // Can access Project, Drawing, and Spec files
         if (!file.fileType || ['project', 'drawing', 'specification', 'link'].includes(file.fileType)) {
-            // In a real strict app, you'd check if they are assigned to this project
-            // For now, allow access if it's a project file
             return true; 
         }
-        return false; // Cannot access estimation/pricing files
+        return false;
     }
 
     return false;
+}
+
+// Helper to run multer as promise
+function runMulter(req, res) {
+    return new Promise((resolve, reject) => {
+        upload.single('file')(req, res, (err) => {
+            if (err) reject(err);
+            else resolve();
+        });
+    });
 }
 
 const handler = async (req, res) => {
@@ -76,13 +73,17 @@ const handler = async (req, res) => {
         // ============================================
         // POST - UPLOAD FILE (Multipart/Form-Data)
         // ============================================
-        // Updated check: uses query param ?action=upload
-        if (req.method === 'POST' && req.query.action === 'upload') {
+        if (req.method === 'POST' && (req.query.action === 'upload' || req.url.includes('upload-file'))) {
             
-            // Run Multer Middleware
-            await util.promisify(upload.single('file'))(req, res);
+            // Run Multer Middleware to parse multipart form data
+            try {
+                await runMulter(req, res);
+            } catch (multerError) {
+                console.error('Multer error:', multerError);
+                return res.status(400).json({ success: false, error: 'File upload error: ' + multerError.message });
+            }
 
-            // Run Auth Middleware (After multer, because multer handles the raw stream)
+            // Run Auth Middleware
             try {
                 await util.promisify(verifyToken)(req, res);
             } catch (authError) {
@@ -94,11 +95,14 @@ const handler = async (req, res) => {
                 return res.status(400).json({ success: false, error: 'No file uploaded' });
             }
 
-            // Extract text fields from body (Multer parses these too)
+            console.log(`📤 Uploading file: ${file.originalname} (${file.size} bytes)`);
+
+            // Extract text fields from body
             const proposalId = req.body.proposalId === 'null' || req.body.proposalId === '' ? null : req.body.proposalId;
+            const projectId = req.body.projectId === 'null' || req.body.projectId === '' ? null : req.body.projectId;
             const fileType = req.body.fileType || 'project';
 
-            // Check permissions
+            // Check permissions for BDM
             if (req.user.role === 'bdm' && proposalId) {
                 const pDoc = await db.collection('proposals').doc(proposalId).get();
                 if (!pDoc.exists || pDoc.data().createdByUid !== req.user.uid) {
@@ -107,7 +111,8 @@ const handler = async (req, res) => {
             }
 
             // Upload to Firebase Storage
-            const storagePath = `${proposalId || 'general'}/${Date.now()}-${file.originalname}`;
+            const folder = proposalId || projectId || 'general';
+            const storagePath = `${folder}/${Date.now()}-${file.originalname}`;
             const fileRef = bucket.file(storagePath);
 
             await fileRef.save(file.buffer, {
@@ -115,15 +120,24 @@ const handler = async (req, res) => {
                 metadata: { contentType: file.mimetype }
             });
 
+            // Make file publicly accessible (alternative to signed URLs)
+            await fileRef.makePublic().catch(e => console.log('Note: Could not make file public:', e.message));
+
+            // Get public URL
+            const publicUrl = `https://storage.googleapis.com/${bucket.name}/${storagePath}`;
+
             // Save Metadata to Firestore
-            // Note: We don't generate a public URL here. We generate a Signed URL on GET.
             const fileData = {
-                storagePath: storagePath, // Save path for generating signed URLs later
+                storagePath: storagePath,
+                fileName: file.originalname,
                 originalName: file.originalname,
                 mimeType: file.mimetype,
                 fileSize: file.size,
                 proposalId: proposalId,
+                projectId: projectId,
                 fileType: fileType,
+                url: publicUrl,
+                fileUrl: publicUrl,
                 uploadedAt: admin.firestore.FieldValue.serverTimestamp(),
                 uploadedByUid: req.user.uid,
                 uploadedByName: req.user.name,
@@ -132,6 +146,8 @@ const handler = async (req, res) => {
 
             const docRef = await db.collection('files').add(fileData);
 
+            console.log(`✅ File uploaded successfully: ${file.originalname}`);
+
             // Log activity
             await db.collection('activities').add({
                 type: 'file_uploaded',
@@ -139,78 +155,106 @@ const handler = async (req, res) => {
                 performedByName: req.user.name,
                 performedByRole: req.user.role,
                 timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                proposalId: proposalId
+                proposalId: proposalId,
+                projectId: projectId
             });
 
-            return res.status(201).json({ success: true, data: { id: docRef.id, ...fileData } });
+            return res.status(201).json({ 
+                success: true, 
+                data: { 
+                    id: docRef.id, 
+                    ...fileData,
+                    url: publicUrl,
+                    fileUrl: publicUrl
+                } 
+            });
         }
 
         // ============================================
-        // AUTHENTICATE FOR OTHER ENDPOINTS (JSON)
+        // AUTHENTICATE FOR OTHER ENDPOINTS
         // ============================================
         await util.promisify(verifyToken)(req, res);
 
         // ============================================
-        // GET - RETRIEVE FILES (Generates Signed URLs)
+        // GET - RETRIEVE FILES
         // ============================================
         if (req.method === 'GET') {
-            const { proposalId, fileId, projectId } = req.query;
-            let query = db.collection('files').orderBy('uploadedAt', 'desc');
-
-            if (fileId) {
-                const doc = await db.collection('files').doc(fileId).get();
+            const { proposalId, fileId, projectId, id } = req.query;
+            
+            // Single file by ID
+            if (fileId || id) {
+                const docId = fileId || id;
+                const doc = await db.collection('files').doc(docId).get();
                 if (!doc.exists) return res.status(404).json({ success: false, error: 'File not found' });
+                
                 const data = doc.data();
                 
-                // Permission Check
                 if (!await canAccessFile(data, req.user.role, req.user.uid)) {
                     return res.status(403).json({ success: false, error: 'Access denied' });
                 }
 
-                // Generate Signed URL (Valid for 1 hour)
-                let signedUrl = data.url; // Fallback to old url if exists
-                if (data.storagePath) {
-                    const [url] = await bucket.file(data.storagePath).getSignedUrl({
-                        action: 'read',
-                        expires: Date.now() + 60 * 60 * 1000, // 1 hour
-                    });
-                    signedUrl = url;
+                // Generate Signed URL if no public URL
+                let fileUrl = data.url || data.fileUrl;
+                if (!fileUrl && data.storagePath) {
+                    try {
+                        const [url] = await bucket.file(data.storagePath).getSignedUrl({
+                            action: 'read',
+                            expires: Date.now() + 60 * 60 * 1000,
+                        });
+                        fileUrl = url;
+                    } catch (e) {
+                        console.error('Error generating signed URL:', e);
+                    }
                 }
 
-                return res.status(200).json({ success: true, data: { ...data, id: doc.id, url: signedUrl } });
+                return res.status(200).json({ 
+                    success: true, 
+                    data: { 
+                        ...data, 
+                        id: doc.id, 
+                        url: fileUrl,
+                        fileUrl: fileUrl
+                    } 
+                });
             }
 
-            // List Filter
-            if (proposalId) query = query.where('proposalId', '==', proposalId);
-            else if (projectId) query = query.where('projectId', '==', projectId); // If you store projectId on files
+            // List files
+            let query = db.collection('files').orderBy('uploadedAt', 'desc');
+
+            if (proposalId) {
+                query = query.where('proposalId', '==', proposalId);
+            } else if (projectId) {
+                query = query.where('projectId', '==', projectId);
+            }
 
             const snapshot = await query.get();
             
-            // Filter and Generate URLs in parallel
+            // Filter and process files
             const filePromises = snapshot.docs.map(async (doc) => {
                 const data = doc.data();
                 const hasAccess = await canAccessFile(data, req.user.role, req.user.uid);
                 
                 if (!hasAccess) return null;
 
-                // Generate Signed URL
-                let signedUrl = data.url;
-                if (data.storagePath && data.fileType !== 'link') {
+                // Get URL
+                let fileUrl = data.url || data.fileUrl;
+                if (!fileUrl && data.storagePath && data.fileType !== 'link') {
                     try {
                         const [url] = await bucket.file(data.storagePath).getSignedUrl({
                             action: 'read',
-                            expires: Date.now() + 60 * 60 * 1000, // 1 hour
+                            expires: Date.now() + 60 * 60 * 1000,
                         });
-                        signedUrl = url;
+                        fileUrl = url;
                     } catch (e) {
-                        console.error(`Error signing URL for ${data.storagePath}:`, e);
+                        console.error(`Error signing URL for ${data.storagePath}:`, e.message);
                     }
                 }
 
                 return { 
                     id: doc.id, 
                     ...data, 
-                    url: signedUrl,
+                    url: fileUrl,
+                    fileUrl: fileUrl,
                     canDelete: data.uploadedByUid === req.user.uid || req.user.role === 'director' 
                 };
             });
@@ -224,44 +268,83 @@ const handler = async (req, res) => {
         // ============================================
         if (req.method === 'DELETE') {
             const { id } = req.query;
+            if (!id) {
+                return res.status(400).json({ success: false, error: 'File ID required' });
+            }
+            
             const doc = await db.collection('files').doc(id).get();
-            if (!doc.exists) return res.status(404).json({ success: false });
+            if (!doc.exists) return res.status(404).json({ success: false, error: 'File not found' });
             
             const data = doc.data();
             if (data.uploadedByUid !== req.user.uid && req.user.role !== 'director') {
                 return res.status(403).json({ success: false, error: 'Permission denied' });
             }
 
+            // Delete from storage
             if (data.storagePath) {
                 await bucket.file(data.storagePath).delete().catch(e => console.log('Storage delete error:', e.message));
             }
+            
+            // Delete from Firestore
             await db.collection('files').doc(id).delete();
             
-            return res.status(200).json({ success: true });
+            console.log(`🗑️ File deleted: ${data.originalName || data.fileName}`);
+            
+            return res.status(200).json({ success: true, message: 'File deleted successfully' });
         }
 
         // ============================================
         // POST - ADD LINKS (JSON Body)
         // ============================================
         if (req.method === 'POST') {
-            // Logic for links (JSON body) remains separate from file upload
-            const { links, proposalId } = req.body;
-            if (links && Array.isArray(links)) {
-                // ... (Keep your existing link saving logic) ...
-                const batch = db.batch();
-                links.forEach(link => {
-                    const ref = db.collection('files').doc();
-                    batch.set(ref, {
-                        ...link,
-                        proposalId,
-                        fileType: 'link',
-                        uploadedAt: admin.firestore.FieldValue.serverTimestamp(),
-                        uploadedByUid: req.user.uid
+            // Parse body if not already parsed
+            if (!req.body || Object.keys(req.body).length === 0) {
+                await new Promise((resolve) => {
+                    const chunks = [];
+                    req.on('data', (chunk) => chunks.push(chunk));
+                    req.on('end', () => {
+                        try {
+                            req.body = JSON.parse(Buffer.concat(chunks).toString());
+                        } catch (e) {
+                            req.body = {};
+                        }
+                        resolve();
                     });
                 });
-                await batch.commit();
-                return res.status(201).json({ success: true });
             }
+
+            const { links, proposalId, projectId } = req.body;
+            
+            if (links && Array.isArray(links)) {
+                const batch = db.batch();
+                const savedLinks = [];
+                
+                links.forEach(link => {
+                    const ref = db.collection('files').doc();
+                    const linkData = {
+                        url: link.url,
+                        fileUrl: link.url,
+                        fileName: link.title || link.name || 'Link',
+                        originalName: link.title || link.name || 'Link',
+                        description: link.description || '',
+                        proposalId: proposalId || null,
+                        projectId: projectId || null,
+                        fileType: 'link',
+                        uploadedAt: admin.firestore.FieldValue.serverTimestamp(),
+                        uploadedByUid: req.user.uid,
+                        uploadedByName: req.user.name
+                    };
+                    batch.set(ref, linkData);
+                    savedLinks.push({ id: ref.id, ...linkData });
+                });
+                
+                await batch.commit();
+                console.log(`🔗 ${links.length} links saved`);
+                
+                return res.status(201).json({ success: true, data: savedLinks });
+            }
+            
+            return res.status(400).json({ success: false, error: 'Invalid request body' });
         }
 
         return res.status(405).json({ success: false, error: 'Method not allowed' });

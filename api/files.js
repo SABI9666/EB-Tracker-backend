@@ -7788,7 +7788,7 @@ async function submitEditedPricing() {
             showFiles();
         }
 
-        // REPLACED IMPLEMENTATION - FIXED FOR PROPER FILE UPLOAD
+        // REPLACED IMPLEMENTATION
         async function handleFileUpload(e) {
             e.preventDefault();
             const fileInput = document.getElementById('fileMgrFileInput');
@@ -7801,38 +7801,26 @@ async function submitEditedPricing() {
 
             try {
                 showLoading();
+                const formData = new FormData();
+                Array.from(fileInput.files).forEach(file => formData.append('files', file));
+                formData.append('fileType', fileType);
+                // Note: These files are not associated with a proposal/project
+                // The backend API at POST /api/files should handle this case.
                 
-                // Upload each file individually using the correct endpoint
-                const uploadPromises = Array.from(fileInput.files).map(async (file) => {
-                    const formData = new FormData();
-                    formData.append('file', file);  // Singular 'file' not 'files'
-                    formData.append('fileType', fileType);
-                    // No proposalId = general file not associated with a proposal
-                    
-                    console.log(`📤 Uploading: ${file.name}`);
-                    
-                    const response = await apiCall('files/upload-file', {
-                        method: 'POST',
-                        body: formData
-                    });
-                    
-                    if (!response.success) {
-                        throw new Error(`Failed to upload ${file.name}: ${response.error}`);
-                    }
-                    
-                    console.log(`✅ Uploaded: ${file.name}`);
-                    return response;
+                const response = await apiCall('files', { 
+                    method: 'POST', 
+                    body: formData 
                 });
-                
-                await Promise.all(uploadPromises);
 
-                showNotification('Files uploaded successfully!', 'success');
-                document.getElementById('fileManagerUploadForm').reset();
-                document.getElementById('fileMgrFilePreview').innerHTML = '';
-                showFiles(); // Refresh file list
-                
+                if (response.success) {
+                    showNotification('Files uploaded successfully!', 'success');
+                    document.getElementById('fileManagerUploadForm').reset();
+                    document.getElementById('fileMgrFilePreview').innerHTML = '';
+                    showFiles(); // Refresh file list
+                } else {
+                    throw new Error(response.error || 'File upload failed');
+                }
             } catch (error) {
-                console.error('❌ Upload error:', error);
                 showNotification(`Upload Error: ${error.message}`, 'error');
             } finally {
                 hideLoading();
@@ -11947,41 +11935,54 @@ async function submitProposalAllocation() {
         console.log('✅ submitTimesheet function registered');
         
         // ============================================
-        // ✅ FILE DOWNLOAD FUNCTION - FIXED FOR FIREBASE STORAGE
+        // ✅ FILE DOWNLOAD FUNCTION
         // ============================================
-        window.downloadFile = function(fileUrl, fileName) {
+        window.downloadFile = async function(fileUrl, fileName) {
             console.log('⬇️ Downloading file:', fileName, 'from:', fileUrl);
-            
             try {
-                // For Firebase Storage URLs, we need to open directly since CORS prevents fetch
-                // The URLs from Firebase Storage are already signed and accessible
+                // Show loading indicator
+                const btn = event.target;
+                const originalText = btn.innerHTML;
+                btn.innerHTML = '⏳ Downloading...';
+                btn.disabled = true;
                 
-                // Create a hidden anchor element
-                const link = document.createElement('a');
-                link.href = fileUrl;
-                link.target = '_blank';
-                link.rel = 'noopener noreferrer';
-                
-                // Try to set download attribute (may not work for cross-origin)
-                if (fileName) {
-                    link.download = fileName;
+                // Fetch the file
+                const response = await fetch(fileUrl);
+                if (!response.ok) {
+                    throw new Error('Failed to fetch file');
                 }
                 
-                // Append to body and click
-                document.body.appendChild(link);
-                link.click();
+                // Get the blob
+                const blob = await response.blob();
+                
+                // Create download link
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = url;
+                a.download = fileName || 'download';
+                document.body.appendChild(a);
+                a.click();
                 
                 // Cleanup
-                setTimeout(() => {
-                    document.body.removeChild(link);
-                }, 100);
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
                 
-                console.log('✅ Download initiated:', fileName);
+                // Restore button
+                btn.innerHTML = originalText;
+                btn.disabled = false;
                 
+                console.log('✅ Download completed:', fileName);
             } catch (error) {
-                console.error('❌ Download error:', error);
+                console.error('❌ Download failed:', error);
                 // Fallback: Open in new tab
                 window.open(fileUrl, '_blank');
+                
+                // Restore button if available
+                if (event && event.target) {
+                    event.target.innerHTML = '⬇️ Download';
+                    event.target.disabled = false;
+                }
             }
         };
         

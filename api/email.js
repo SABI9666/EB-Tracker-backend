@@ -29,8 +29,8 @@ const EMAIL_RECIPIENT_MAP = {
   
   // New notification types for timesheet workflow
   'time_request.created': ['design_lead', 'coo', 'director'], // Designer requests additional hours
-  'time_request.approved': ['designer', 'design_lead', 'director'], // COO approves additional hours
-  'time_request.rejected': ['designer', 'design_lead'], // COO rejects additional hours
+  'time_request.approved': ['design_lead', 'director'], // COO approves additional hours - Designer added dynamically via data.designerEmail
+  'time_request.rejected': ['design_lead'], // COO rejects additional hours - Designer added dynamically via data.designerEmail
   'variation.requested': ['coo', 'director'], // Design Manager requests variation
   'variation.approved_detail': ['design_lead', 'bdm', 'director', 'coo'], // Variation approval with hour/rate details
   'invoice.created': ['coo', 'director', 'bdm'], // Invoice created
@@ -506,6 +506,19 @@ async function getDesignManagerEmail(projectId) {
   return null;
 }
 
+// Get specific designer email by UID (for time requests)
+async function getDesignerEmailByUid(designerUid) {
+  try {
+    if (designerUid) {
+      const userDoc = await db.collection('users').doc(designerUid).get();
+      if (userDoc.exists) return userDoc.data().email;
+    }
+  } catch (e) {
+    console.error("⚠️ Error fetching Designer email by UID:", e.message);
+  }
+  return null;
+}
+
 function interpolate(template, data) {
   let result = template || '';
   for (const key in data) {
@@ -557,11 +570,21 @@ async function sendEmailNotification(event, data) {
       }
   }
   
-  // Add Designer for relevant events
-  if (['designer.allocated', 'time_request.approved', 'time_request.rejected'].includes(event) 
-      && data.designerEmail) {
-      recipients.push(data.designerEmail);
-      console.log(`🎨 Added Designer: ${data.designerEmail}`);
+  // Add Designer for relevant events (ONLY the specific requesting designer, not all designers)
+  if (['designer.allocated', 'time_request.approved', 'time_request.rejected'].includes(event)) {
+      let designerEmail = data.designerEmail;
+      
+      // If no email provided, try to fetch by designerUid or requestedByUid
+      if (!designerEmail && (data.designerUid || data.requestedByUid)) {
+          designerEmail = await getDesignerEmailByUid(data.designerUid || data.requestedByUid);
+      }
+      
+      if (designerEmail) {
+          recipients.push(designerEmail);
+          console.log(`🎨 Added Specific Designer: ${designerEmail}`);
+      } else {
+          console.warn(`⚠️ No designer email found for event: ${event}`);
+      }
   }
 
   // 3. Clean List

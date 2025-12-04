@@ -872,6 +872,47 @@ const handler = async (req, res) => {
             // ============================================
 
             // ============================================
+            // NEW: Update Max Allocated Hours (Budget)
+            // ============================================
+            else if (action === 'update_max_hours') {
+                // Only COO or Director can update budget
+                if (!['coo', 'director'].includes(req.user.role)) {
+                    return res.status(403).json({ 
+                        success: false, 
+                        error: 'Only COO or Director can update project budget' 
+                    });
+                }
+
+                const { maxAllocatedHours } = data;
+
+                if (!maxAllocatedHours || maxAllocatedHours <= 0) {
+                    return res.status(400).json({ success: false, error: 'Valid max allocated hours is required' });
+                }
+
+                const oldMaxHours = parseFloat(project.maxAllocatedHours) || 0;
+                const newMaxHours = parseFloat(maxAllocatedHours);
+
+                updates = {
+                    maxAllocatedHours: newMaxHours,
+                    lastBudgetEdit: {
+                        previousMaxHours: oldMaxHours,
+                        newMaxHours: newMaxHours,
+                        editedBy: req.user.name,
+                        editedByUid: req.user.uid,
+                        reason: `Budget updated from ${oldMaxHours}h to ${newMaxHours}h`,
+                        timestamp: new Date().toISOString()
+                    }
+                };
+
+                activityDetail = `Project budget updated by ${req.user.name}: ${oldMaxHours}h → ${newMaxHours}h`;
+
+                console.log(`✅ Project budget updated: ${oldMaxHours}h → ${newMaxHours}h`);
+            }
+            // ============================================
+            // END: Update Max Allocated Hours
+            // ============================================
+
+            // ============================================
             // END: COO Assigning Multiple Designers
             // ============================================
             

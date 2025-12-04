@@ -1,4 +1,4 @@
-// api/projects.js - CONSOLIDATED with variation code generator + EMAIL NOTIFICATIONS
+// api/projects.js - CONSOLIDATED with variation code generator + EMAIL NOTIFICATIONS + ALLOCATION EDITING
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
@@ -756,6 +756,121 @@ const handler = async (req, res) => {
                 
                 activityDetail = `COO Multi-Designer allocation performed by ${req.user.name}. Total allocated hours: ${parseFloat(totalAllocatedHours).toFixed(1)}. Status: ${allocStatus.replace('_', ' ')}.`;
             }
+            
+            // ============================================
+            // NEW FEATURE 2: COO Direct Edit Designer Allocated Hours
+            // ============================================
+            else if (action === 'update_designer_allocation') {
+                // Only COO or Director can edit allocations
+                if (!['coo', 'director'].includes(req.user.role)) {
+                    return res.status(403).json({ 
+                        success: false, 
+                        error: 'Only COO or Director can edit designer allocations' 
+                    });
+                }
+
+                const { 
+                    designerUid,
+                    designerName,
+                    designerEmail,
+                    newAllocatedHours,
+                    reason
+                } = data;
+
+                // Validation
+                if (!designerUid) {
+                    return res.status(400).json({ success: false, error: 'Designer UID is required' });
+                }
+                if (newAllocatedHours === undefined || newAllocatedHours === null || newAllocatedHours < 0) {
+                    return res.status(400).json({ success: false, error: 'Valid new allocated hours is required' });
+                }
+
+                // Get current designer hours
+                let designerHours = project.designerHours || {};
+                const oldHours = parseFloat(designerHours[designerUid]) || 0;
+                const newHours = parseFloat(newAllocatedHours);
+                const hoursDiff = newHours - oldHours;
+
+                // Calculate new total allocated hours
+                const currentTotal = parseFloat(project.totalAllocatedHours) || 0;
+                const newTotalAllocated = currentTotal + hoursDiff;
+                const maxBudget = parseFloat(project.maxAllocatedHours) || 0;
+
+                // Validate not exceeding budget (if there's a budget set)
+                if (maxBudget > 0 && newTotalAllocated > maxBudget + 0.1) {
+                    return res.status(400).json({ 
+                        success: false, 
+                        error: `Cannot allocate ${newHours}h to ${designerName}. Would exceed budget by ${(newTotalAllocated - maxBudget).toFixed(1)} hours. Budget: ${maxBudget}h, Current total: ${currentTotal}h` 
+                    });
+                }
+
+                // Update designer hours
+                designerHours[designerUid] = newHours;
+
+                // Calculate new allocation status
+                let allocStatus = 'not_started';
+                if (newTotalAllocated > 0 && newTotalAllocated < maxBudget - 0.1) {
+                    allocStatus = 'partial';
+                } else if (maxBudget > 0 && newTotalAllocated >= maxBudget - 0.1) {
+                    allocStatus = 'completed';
+                } else if (newTotalAllocated > 0) {
+                    allocStatus = 'partial';
+                }
+
+                updates = {
+                    designerHours: designerHours,
+                    totalAllocatedHours: newTotalAllocated,
+                    allocationStatus: allocStatus,
+                    lastAllocationEdit: {
+                        designerUid: designerUid,
+                        designerName: designerName || 'Unknown',
+                        previousHours: oldHours,
+                        newHours: newHours,
+                        editedBy: req.user.name,
+                        editedByUid: req.user.uid,
+                        reason: reason || '',
+                        editedAt: admin.firestore.FieldValue.serverTimestamp()
+                    }
+                };
+
+                activityDetail = `${req.user.name} updated ${designerName}'s allocation: ${oldHours}h → ${newHours}h (${hoursDiff >= 0 ? '+' : ''}${hoursDiff}h)`;
+
+                // Notify the designer about their updated hours
+                notifications.push({
+                    type: 'allocation_hours_updated',
+                    recipientUid: designerUid,
+                    recipientRole: 'designer',
+                    message: `Your allocated hours on "${project.projectName}" have been updated from ${oldHours}h to ${newHours}h by ${req.user.name}`,
+                    projectId: id,
+                    projectName: project.projectName,
+                    oldHours: oldHours,
+                    newHours: newHours,
+                    updatedBy: req.user.name,
+                    priority: 'normal'
+                });
+
+                // Send email notification to designer
+                if (designerEmail) {
+                    try {
+                        await sendEmailNotification('allocation.hours_updated', {
+                            projectName: project.projectName,
+                            designerName: designerName,
+                            oldHours: oldHours,
+                            newHours: newHours,
+                            updatedBy: req.user.name,
+                            designerEmail: designerEmail
+                        });
+                    } catch (emailErr) {
+                        console.error('Email notification failed:', emailErr);
+                    }
+                }
+
+                console.log(`✅ Designer allocation updated: ${designerName} - ${oldHours}h → ${newHours}h`);
+            }
+            // ============================================
+            // END: COO Direct Edit Designer Allocated Hours
+            // ============================================
+
             // ============================================
             // END: COO Assigning Multiple Designers
             // ============================================

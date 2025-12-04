@@ -913,6 +913,48 @@ const handler = async (req, res) => {
             // ============================================
 
             // ============================================
+            // NEW: Update Project Number
+            // ============================================
+            else if (action === 'update_project_number') {
+                // Only COO or Director can update project number
+                if (!['coo', 'director'].includes(req.user.role)) {
+                    return res.status(403).json({ 
+                        success: false, 
+                        error: 'Only COO or Director can update project number' 
+                    });
+                }
+
+                const { projectNumber } = data;
+
+                if (!projectNumber || projectNumber.trim() === '') {
+                    return res.status(400).json({ success: false, error: 'Project number is required' });
+                }
+
+                const oldProjectNumber = project.projectNumber || '';
+                const newProjectNumber = projectNumber.trim();
+
+                updates = {
+                    projectNumber: newProjectNumber,
+                    lastProjectNumberEdit: {
+                        previousNumber: oldProjectNumber,
+                        newNumber: newProjectNumber,
+                        editedBy: req.user.name,
+                        editedByUid: req.user.uid,
+                        timestamp: new Date().toISOString()
+                    }
+                };
+
+                activityDetail = oldProjectNumber 
+                    ? `Project number updated by ${req.user.name}: ${oldProjectNumber} → ${newProjectNumber}`
+                    : `Project number set by ${req.user.name}: ${newProjectNumber}`;
+
+                console.log(`✅ Project number updated: ${oldProjectNumber || 'N/A'} → ${newProjectNumber}`);
+            }
+            // ============================================
+            // END: Update Project Number
+            // ============================================
+
+            // ============================================
             // END: COO Assigning Multiple Designers
             // ============================================
             

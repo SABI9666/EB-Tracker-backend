@@ -105,7 +105,7 @@ const handler = async (req, res) => {
         }
 
         // ============================================
-        // POST - COO creates allocation change request
+        // POST - COO creates allocation/budget change request
         // ============================================
         if (req.method === 'POST') {
             // Only COO can create allocation change requests
@@ -118,23 +118,26 @@ const handler = async (req, res) => {
 
             const { 
                 projectId, 
+                requestType,  // 'designer_hours' or 'budget_change'
+                // For designer hours change:
                 designerUid,
                 designerName,
                 designerEmail,
                 currentAllocatedHours, 
                 requestedNewHours, 
-                reason  // Mandatory comment
+                // For budget change:
+                currentBudget,
+                requestedBudget,
+                // Common:
+                reason,
+                projectName: providedProjectName,
+                projectCode: providedProjectCode,
+                clientCompany: providedClientCompany
             } = req.body;
 
             // Validation
             if (!projectId) {
                 return res.status(400).json({ success: false, error: 'Project ID is required' });
-            }
-            if (!designerUid) {
-                return res.status(400).json({ success: false, error: 'Designer UID is required' });
-            }
-            if (requestedNewHours === undefined || requestedNewHours === null) {
-                return res.status(400).json({ success: false, error: 'Requested new hours is required' });
             }
             if (!reason || reason.trim() === '') {
                 return res.status(400).json({ success: false, error: 'Reason for change is mandatory' });
@@ -147,32 +150,90 @@ const handler = async (req, res) => {
             }
             const project = projectDoc.data();
 
-            // Create the request
-            const requestData = {
-                projectId,
-                projectName: project.projectName || 'Unknown Project',
-                projectCode: project.projectCode || '',
-                clientCompany: project.clientCompany || '',
-                
-                designerUid,
-                designerName: designerName || 'Unknown Designer',
-                designerEmail: designerEmail || '',
-                
-                currentAllocatedHours: parseFloat(currentAllocatedHours) || 0,
-                requestedNewHours: parseFloat(requestedNewHours),
-                hoursDifference: parseFloat(requestedNewHours) - (parseFloat(currentAllocatedHours) || 0),
-                
-                reason: reason.trim(),
-                
-                status: 'pending',
-                
-                requestedByUid: req.user.uid,
-                requestedByName: req.user.name,
-                requestedByEmail: req.user.email,
-                
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            };
+            let requestData;
+            let notificationMessage;
+            let activityDetails;
+
+            // ============================================
+            // BUDGET CHANGE REQUEST
+            // ============================================
+            if (requestType === 'budget_change') {
+                if (requestedBudget === undefined || requestedBudget === null) {
+                    return res.status(400).json({ success: false, error: 'Requested budget is required' });
+                }
+
+                const currentBudgetValue = parseFloat(currentBudget) || parseFloat(project.maxAllocatedHours) || 0;
+                const requestedBudgetValue = parseFloat(requestedBudget);
+
+                requestData = {
+                    projectId,
+                    projectName: providedProjectName || project.projectName || 'Unknown Project',
+                    projectCode: providedProjectCode || project.projectCode || project.projectNumber || '',
+                    clientCompany: providedClientCompany || project.clientCompany || '',
+                    
+                    requestType: 'budget_change',
+                    
+                    currentBudget: currentBudgetValue,
+                    requestedBudget: requestedBudgetValue,
+                    budgetDifference: requestedBudgetValue - currentBudgetValue,
+                    
+                    reason: reason.trim(),
+                    
+                    status: 'pending',
+                    
+                    requestedByUid: req.user.uid,
+                    requestedByName: req.user.name,
+                    requestedByEmail: req.user.email,
+                    
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                };
+
+                notificationMessage = `COO ${req.user.name} requests budget change for project "${requestData.projectName}" from ${currentBudgetValue}h to ${requestedBudgetValue}h. Reason: ${reason.trim().substring(0, 100)}...`;
+                activityDetails = `COO ${req.user.name} requested budget change: ${currentBudgetValue}h → ${requestedBudgetValue}h`;
+            }
+            // ============================================
+            // DESIGNER HOURS CHANGE REQUEST
+            // ============================================
+            else {
+                if (!designerUid) {
+                    return res.status(400).json({ success: false, error: 'Designer UID is required' });
+                }
+                if (requestedNewHours === undefined || requestedNewHours === null) {
+                    return res.status(400).json({ success: false, error: 'Requested new hours is required' });
+                }
+
+                requestData = {
+                    projectId,
+                    projectName: project.projectName || 'Unknown Project',
+                    projectCode: project.projectCode || '',
+                    clientCompany: project.clientCompany || '',
+                    
+                    requestType: 'designer_hours',
+                    
+                    designerUid,
+                    designerName: designerName || 'Unknown Designer',
+                    designerEmail: designerEmail || '',
+                    
+                    currentAllocatedHours: parseFloat(currentAllocatedHours) || 0,
+                    requestedNewHours: parseFloat(requestedNewHours),
+                    hoursDifference: parseFloat(requestedNewHours) - (parseFloat(currentAllocatedHours) || 0),
+                    
+                    reason: reason.trim(),
+                    
+                    status: 'pending',
+                    
+                    requestedByUid: req.user.uid,
+                    requestedByName: req.user.name,
+                    requestedByEmail: req.user.email,
+                    
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                };
+
+                notificationMessage = `COO ${req.user.name} requests to change allocation for "${designerName}" on project "${project.projectName}" from ${currentAllocatedHours}h to ${requestedNewHours}h`;
+                activityDetails = `COO ${req.user.name} requested allocation change for ${designerName}: ${currentAllocatedHours}h → ${requestedNewHours}h`;
+            }
 
             const requestRef = await db.collection('allocation-change-requests').add(requestData);
 
@@ -180,10 +241,11 @@ const handler = async (req, res) => {
             await db.collection('notifications').add({
                 type: 'allocation_change_request',
                 recipientRole: 'director',
-                message: `COO ${req.user.name} requests to change allocation for "${designerName}" on project "${project.projectName}" from ${currentAllocatedHours}h to ${requestedNewHours}h`,
+                message: notificationMessage,
                 requestId: requestRef.id,
                 projectId,
                 projectName: project.projectName,
+                requestType: requestData.requestType,
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
                 isRead: false,
                 priority: 'high'
@@ -196,9 +258,10 @@ const handler = async (req, res) => {
                     const directorEmail = directorSnapshot.docs[0].data().email;
                     await sendEmailNotification('allocation.change_request', {
                         projectName: project.projectName,
-                        designerName: designerName,
-                        currentHours: currentAllocatedHours,
-                        requestedHours: requestedNewHours,
+                        requestType: requestData.requestType,
+                        designerName: designerName || 'N/A',
+                        currentHours: currentAllocatedHours || currentBudget,
+                        requestedHours: requestedNewHours || requestedBudget,
                         reason: reason,
                         requestedBy: req.user.name,
                         directorEmail: directorEmail
@@ -211,7 +274,7 @@ const handler = async (req, res) => {
             // Log activity
             await db.collection('activities').add({
                 type: 'allocation_change_requested',
-                details: `COO ${req.user.name} requested allocation change for ${designerName}: ${currentAllocatedHours}h → ${requestedNewHours}h`,
+                details: activityDetails,
                 performedByName: req.user.name,
                 performedByRole: req.user.role,
                 performedByUid: req.user.uid,
@@ -223,7 +286,9 @@ const handler = async (req, res) => {
 
             return res.status(201).json({ 
                 success: true, 
-                message: 'Allocation change request submitted for Director approval',
+                message: requestData.requestType === 'budget_change' 
+                    ? 'Budget change request submitted for Director approval'
+                    : 'Allocation change request submitted for Director approval',
                 requestId: requestRef.id
             });
         }
@@ -272,20 +337,88 @@ const handler = async (req, res) => {
             };
 
             // ============================================
-            // APPROVE - Update project designer hours
+            // APPROVE - Update project based on request type
             // ============================================
             if (action === 'approve') {
-                const approvedHours = parseFloat(finalApprovedHours) || request.requestedNewHours;
-                
                 updateData.status = 'approved';
-                updateData.finalApprovedHours = approvedHours;
-
-                // Update the project's designer hours
+                
                 const projectRef = db.collection('projects').doc(request.projectId);
                 const projectDoc = await projectRef.get();
                 
-                if (projectDoc.exists) {
-                    const project = projectDoc.data();
+                if (!projectDoc.exists) {
+                    return res.status(404).json({ success: false, error: 'Project not found' });
+                }
+                
+                const project = projectDoc.data();
+
+                // ============================================
+                // BUDGET CHANGE APPROVAL
+                // ============================================
+                if (request.requestType === 'budget_change') {
+                    const approvedBudget = parseFloat(finalApprovedHours) || request.requestedBudget;
+                    updateData.finalApprovedBudget = approvedBudget;
+
+                    // Update the project's max allocated hours
+                    await projectRef.update({
+                        maxAllocatedHours: approvedBudget,
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                        lastBudgetChange: {
+                            previousBudget: request.currentBudget,
+                            newBudget: approvedBudget,
+                            approvedBy: req.user.name,
+                            approvedByUid: req.user.uid,
+                            reason: request.reason,
+                            approvedAt: new Date().toISOString()
+                        }
+                    });
+
+                    // Notify COO
+                    await db.collection('notifications').add({
+                        type: 'budget_change_approved',
+                        recipientUid: request.requestedByUid,
+                        recipientRole: 'coo',
+                        message: `Director ${req.user.name} approved your budget change request for "${request.projectName}". Budget updated from ${request.currentBudget}h to ${approvedBudget}h`,
+                        requestId: id,
+                        projectId: request.projectId,
+                        projectName: request.projectName,
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        isRead: false,
+                        priority: 'high'
+                    });
+
+                    // Log activity
+                    await db.collection('activities').add({
+                        type: 'budget_change_approved',
+                        details: `Director ${req.user.name} approved budget change for "${request.projectName}": ${request.currentBudget}h → ${approvedBudget}h`,
+                        performedByName: req.user.name,
+                        performedByRole: req.user.role,
+                        performedByUid: req.user.uid,
+                        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                        projectId: request.projectId,
+                        projectName: request.projectName,
+                        requestId: id
+                    });
+
+                    // Send email to COO
+                    try {
+                        await sendEmailNotification('budget.change_approved', {
+                            projectName: request.projectName,
+                            oldBudget: request.currentBudget,
+                            newBudget: approvedBudget,
+                            approvedBy: req.user.name,
+                            cooEmail: request.requestedByEmail
+                        });
+                    } catch (emailErr) {
+                        console.error('Email notification failed:', emailErr);
+                    }
+                }
+                // ============================================
+                // DESIGNER HOURS CHANGE APPROVAL
+                // ============================================
+                else {
+                    const approvedHours = parseFloat(finalApprovedHours) || request.requestedNewHours;
+                    updateData.finalApprovedHours = approvedHours;
+
                     let designerHours = project.designerHours || {};
                     const oldHours = designerHours[request.designerUid] || 0;
                     
@@ -364,20 +497,20 @@ const handler = async (req, res) => {
                     } catch (emailErr) {
                         console.error('Email notification failed:', emailErr);
                     }
-                }
 
-                // Log activity
-                await db.collection('activities').add({
-                    type: 'allocation_change_approved',
-                    details: `Director ${req.user.name} approved allocation change for ${request.designerName}: ${request.currentAllocatedHours}h → ${approvedHours}h`,
-                    performedByName: req.user.name,
-                    performedByRole: req.user.role,
-                    performedByUid: req.user.uid,
-                    timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                    projectId: request.projectId,
-                    projectName: request.projectName,
-                    requestId: id
-                });
+                    // Log activity
+                    await db.collection('activities').add({
+                        type: 'allocation_change_approved',
+                        details: `Director ${req.user.name} approved allocation change for ${request.designerName}: ${request.currentAllocatedHours}h → ${approvedHours}h`,
+                        performedByName: req.user.name,
+                        performedByRole: req.user.role,
+                        performedByUid: req.user.uid,
+                        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                        projectId: request.projectId,
+                        projectName: request.projectName,
+                        requestId: id
+                    });
+                }
 
             // ============================================
             // REJECT - Notify COO
@@ -496,3 +629,5 @@ const handler = async (req, res) => {
 };
 
 module.exports = allowCors(handler);
+
+

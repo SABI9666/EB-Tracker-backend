@@ -8,7 +8,7 @@ const db = admin.firestore();
 // ============================================
 // EMPLOYEE: Submit Leave Request
 // ============================================
-router.post('/submit', verifyToken, requireRole(['bdm', 'estimator', 'designer', 'accounts', 'coo']), async (req, res) => {
+router.post('/submit', verifyToken, requireRole(['bdm', 'estimator', 'designer', 'accounts', 'coo', 'hr', 'director']), async (req, res) => {
     try {
         const {
             leaveType,
@@ -545,3 +545,13 @@ router.get('/all/requests', verifyToken, requireRole(['coo', 'director', 'hr']),
 });
 
 module.exports = router;
+
+
+
+
+
+
+
+
+
+

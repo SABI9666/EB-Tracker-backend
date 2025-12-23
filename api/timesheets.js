@@ -1,11 +1,3 @@
-
-Copy
-
-// ============================================
-// TIMESHEETS API - COMPLETE WITH ALL ANALYTICS
-// Version: 3.0.0 - Director/HR Analytics + Designer Self-View
-// ============================================
-
 const express = require('express');
 const admin = require('./_firebase-admin');
 const db = admin.firestore();
@@ -15,10 +7,6 @@ const util = require('util');
 
 const timesheetsRouter = express.Router();
 const timeRequestRouter = express.Router();
-
-// ============================================
-// HELPER FUNCTIONS
-// ============================================
 
 const getAggregatedProjectHours = async (projectId) => {
     try {
@@ -95,11 +83,6 @@ const parseDate = (dateValue) => {
     return null;
 };
 
-
-// ============================================
-// TIMESHEETS ROUTER (/api/timesheets)
-// ============================================
-
 timesheetsRouter.get('/', async (req, res) => {
     
     try {
@@ -113,7 +96,6 @@ timesheetsRouter.get('/', async (req, res) => {
     const designerUid = req.user.uid;
     const userRole = req.user.role;
 
-    // ================== 1. EXECUTIVE DASHBOARD ==================
     if (action === 'executive_dashboard') {
         try {
             const projectsSnapshot = await db.collection('projects').get();
@@ -215,7 +197,6 @@ timesheetsRouter.get('/', async (req, res) => {
         }
     }
 
-    // ================== 2. GET ALL TIMESHEETS (COO/Director/HR) ==================
     if (action === 'all') {
         if (!['coo', 'director', 'hr'].includes(userRole)) {
             return res.status(403).json({ success: false, error: 'Access denied. COO/Director/HR only.' });
@@ -239,7 +220,6 @@ timesheetsRouter.get('/', async (req, res) => {
         }
     }
 
-    // ================== 3. DESIGNER WEEKLY REPORT (Director/HR/COO) ==================
     if (action === 'designer_weekly_report') {
         if (!['coo', 'director', 'hr'].includes(userRole)) {
             return res.status(403).json({ success: false, error: 'Access denied. COO/Director/HR only.' });
@@ -383,7 +363,6 @@ timesheetsRouter.get('/', async (req, res) => {
         }
     }
 
-    // ================== 4. MY ANALYTICS (Designer Self-View) ==================
     if (action === 'my_analytics') {
         try {
             const timesheets = [];
@@ -394,7 +373,6 @@ timesheetsRouter.get('/', async (req, res) => {
             
             snapshot.forEach(doc => timesheets.push({ id: doc.id, ...doc.data() }));
             
-            // Process into daily, weekly, monthly breakdown
             const dailyHours = {};
             const weeklyHours = {};
             const monthlyHours = {};
@@ -416,7 +394,6 @@ timesheetsRouter.get('/', async (req, res) => {
                 totalHours += hours;
                 workingDays.add(dayKey);
                 
-                // Daily
                 if (!dailyHours[dayKey]) {
                     dailyHours[dayKey] = { date: dayKey, hours: 0, entries: [] };
                 }
@@ -428,7 +405,6 @@ timesheetsRouter.get('/', async (req, res) => {
                     description: entry.description || ''
                 });
                 
-                // Weekly
                 if (!weeklyHours[weekKey]) {
                     weeklyHours[weekKey] = { 
                         week: weekKey, 
@@ -442,7 +418,6 @@ timesheetsRouter.get('/', async (req, res) => {
                 weeklyHours[weekKey].daysWorked.add(dayKey);
                 if (entry.projectId) weeklyHours[weekKey].projects.add(entry.projectId);
                 
-                // Monthly
                 if (!monthlyHours[monthKey]) {
                     monthlyHours[monthKey] = { 
                         month: monthKey, 
@@ -456,7 +431,6 @@ timesheetsRouter.get('/', async (req, res) => {
                 monthlyHours[monthKey].daysWorked.add(dayKey);
                 if (entry.projectId) monthlyHours[monthKey].projects.add(entry.projectId);
                 
-                // By Project
                 const projKey = entry.projectId || 'unknown';
                 if (!projectHours[projKey]) {
                     projectHours[projKey] = {
@@ -471,10 +445,9 @@ timesheetsRouter.get('/', async (req, res) => {
                 projectHours[projKey].entries += 1;
             });
             
-            // Convert to arrays and sort
             const dailyData = Object.values(dailyHours)
                 .sort((a, b) => new Date(b.date) - new Date(a.date))
-                .slice(0, 30); // Last 30 days
+                .slice(0, 30);
             
             const weeklyData = Object.values(weeklyHours)
                 .map(w => ({
@@ -484,7 +457,7 @@ timesheetsRouter.get('/', async (req, res) => {
                     avgPerDay: w.daysWorked.size > 0 ? Math.round((w.hours / w.daysWorked.size) * 100) / 100 : 0
                 }))
                 .sort((a, b) => new Date(b.week) - new Date(a.week))
-                .slice(0, 12); // Last 12 weeks
+                .slice(0, 12);
             
             const monthlyData = Object.values(monthlyHours)
                 .map(m => ({
@@ -494,12 +467,11 @@ timesheetsRouter.get('/', async (req, res) => {
                     avgPerDay: m.daysWorked.size > 0 ? Math.round((m.hours / m.daysWorked.size) * 100) / 100 : 0
                 }))
                 .sort((a, b) => new Date(b.month) - new Date(a.month))
-                .slice(0, 12); // Last 12 months
+                .slice(0, 12);
             
             const projectData = Object.values(projectHours)
                 .sort((a, b) => b.hours - a.hours);
             
-            // Calculate summary stats
             const uniqueDays = workingDays.size;
             const uniqueWeeks = Object.keys(weeklyHours).length;
             const uniqueMonths = Object.keys(monthlyHours).length;
@@ -515,7 +487,6 @@ timesheetsRouter.get('/', async (req, res) => {
                 avgMonthlyHours: uniqueMonths > 0 ? Math.round((totalHours / uniqueMonths) * 100) / 100 : 0
             };
             
-            // Current period stats
             const today = new Date();
             const thisWeekKey = getWeekStart(today).toISOString().split('T')[0];
             const thisMonthKey = getMonthStart(today).toISOString().split('T')[0];
@@ -544,7 +515,6 @@ timesheetsRouter.get('/', async (req, res) => {
         }
     }
 
-    // ================== 5. GET TIMESHEETS FOR ONE PROJECT ==================
     if (projectId) {
         try {
             const timesheets = [];
@@ -561,7 +531,6 @@ timesheetsRouter.get('/', async (req, res) => {
         }
     }
 
-    // ================== 6. GET MY TIMESHEETS (DESIGNER) ==================
     try {
         const timesheets = [];
         const snapshot = await db.collection('timesheets')
@@ -577,10 +546,6 @@ timesheetsRouter.get('/', async (req, res) => {
     }
 });
 
-
-/**
- * POST /api/timesheets
- */
 timesheetsRouter.post('/', async (req, res) => {
     
     try {
@@ -645,9 +610,6 @@ timesheetsRouter.post('/', async (req, res) => {
     }
 });
 
-/**
- * DELETE /api/timesheets?id=...
- */
 timesheetsRouter.delete('/', async (req, res) => {
     
     try {
@@ -692,11 +654,6 @@ timesheetsRouter.delete('/', async (req, res) => {
         return res.status(500).json({ success: false, error: error.message });
     }
 });
-
-
-// ============================================
-// TIME REQUESTS ROUTER (/api/time-requests)
-// ============================================
 
 timeRequestRouter.get('/', async (req, res) => {
     try {

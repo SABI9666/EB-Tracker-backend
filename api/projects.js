@@ -1,6 +1,3 @@
-
-Copy
-
 // api/projects.js - CONSOLIDATED with variation code generator + EMAIL NOTIFICATIONS + ALLOCATION EDITING + DESIGN FILE WORKFLOW
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');

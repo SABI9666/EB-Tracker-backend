@@ -1,4 +1,4 @@
-// server.js - Complete backend entry point with EMAIL + TIMESHEET + VARIATIONS + TIME-REQUESTS + ALLOCATION-REQUESTS API
+// server.js - Complete backend entry point with EMAIL + TIMESHEET + VARIATIONS + TIME-REQUESTS + ALLOCATION-REQUESTS + DESIGN FILES API
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -7,7 +7,6 @@ const compression = require('compression');
 require('dotenv').config();
 
 // === IMPORT YOUR AUTH MIDDLEWARE ===
-// <<< MODIFIED: Imports 'verifyToken' from your file
 const { verifyToken } = require('./middleware/auth.js'); 
 
 const app = express();
@@ -34,7 +33,9 @@ app.use(cors({
             'http://localhost:5500',
             'http://127.0.0.1:5500',
             'https://eb-tracker-frontend.vercel.app',
-            'https://eb-tracker-frontend-*.vercel.app', // Vercel preview deployments
+            'https://eb-tracker-frontend-*.vercel.app',
+            'https://edanbrook-tracker.web.app',
+            'https://edanbrook-tracker.firebaseapp.com',
         ];
         
         // Check if origin matches allowed patterns
@@ -46,7 +47,7 @@ app.use(cors({
             return allowedOrigin === origin;
         });
         
-        if (isAllowed || origin.includes('vercel.app')) {
+        if (isAllowed || origin.includes('vercel.app') || origin.includes('web.app') || origin.includes('firebaseapp.com')) {
             callback(null, true);
         } else {
             console.log('⚠️ CORS blocked origin:', origin);
@@ -94,32 +95,37 @@ app.get('/health', (req, res) => {
         message: 'Backend running',
         firebase: admin.apps.length > 0 ? 'Connected' : 'Not initialized',
         timestamp: new Date().toISOString(),
-        cors: 'Enabled'
+        cors: 'Enabled',
+        version: '2.1.0'
     });
 });
 
 app.get('/', (req, res) => {
     res.json({
         message: 'EBTracker Backend API',
-        version: '1.2.0',
+        version: '2.1.0',
         status: 'running',
+        features: [
+            'Design File Upload & Approval Workflow',
+            'Timesheet Management',
+            'Leave Requests',
+            'HR Screening',
+            'Email Notifications'
+        ],
         endpoints: [
             'GET  /health - Health check',
             'GET  /api/dashboard - Dashboard data',
-            'POST /api/allocation-requests - COO request allocation/budget change',
-            'GET  /api/allocation-requests - Get pending requests',
-            'PUT  /api/allocation-requests - Director approve/reject',
+            '*    /api/projects - Projects + Design Files',
+            '*    /api/proposals - Proposals',
+            '*    /api/timesheets - Timesheet entries',
+            '*    /api/time-requests - Time extension requests',
+            '*    /api/allocation-requests - Allocation requests',
+            '*    /api/leave-requests - Leave requests',
+            '*    /api/screening - HR Candidate screening',
+            '*    /api/email - Email notifications',
         ]
     });
 });
-
-// ============================================
-// APPLY AUTH MIDDLEWARE
-// ============================================
-// ❌ COMMENTED OUT: Each handler already calls verifyToken internally
-// Applying auth globally here causes route conflicts and 404 errors
-// app.use('/api', verifyToken);
-
 
 // ============================================
 // API ROUTES - Import handlers
@@ -165,20 +171,35 @@ try {
     const variationsHandler = require('./api/variations');
     
     console.log('  Loading email...');
-    // --- FIX: Import the 'emailHandler' object from the refactored file ---
     const { emailHandler } = require('./api/email');
     
     console.log('  Loading timesheets...');
     const { timesheetsRouter, timeRequestRouter } = require('./api/timesheets');
 
-    // ============================================
-    // NEW: Load allocation-requests handler
-    // ============================================
     console.log('  Loading allocation-requests...');
     const allocationRequestsHandler = require('./api/allocation-requests');
     
     console.log('  Loading leave-requests...');
     const leaveRequestsHandler = require('./api/leave-requests');
+
+    // NEW: Load screening handler
+    console.log('  Loading screening...');
+    let screeningHandler = null;
+    try {
+        screeningHandler = require('./api/screening');
+        console.log('  ✅ Screening loaded');
+    } catch (e) {
+        console.log('  ⚠️ Screening handler not found - creating placeholder');
+        // Create a placeholder router if screening.js doesn't exist
+        const screeningRouter = express.Router();
+        screeningRouter.all('*', (req, res) => {
+            res.status(501).json({ 
+                success: false, 
+                error: 'Screening module not implemented yet' 
+            });
+        });
+        screeningHandler = screeningRouter;
+    }
 
     console.log('✅ All handlers loaded successfully');
 
@@ -197,19 +218,11 @@ try {
     app.use('/api/users', usersHandler);
     app.use('/api/variations', variationsHandler);
     app.use('/api/email', emailHandler);
-
-    // --- REVERTED FIX ---
-    // The verifyToken middleware is now called inside timesheets.js
-    // to match the pattern used in proposals.js
     app.use('/api/timesheets', timesheetsRouter);
     app.use('/api/time-requests', timeRequestRouter);
-    // --- End of Revert ---
-
-    // ============================================
-    // NEW: Register allocation-requests route
-    // ============================================
     app.use('/api/allocation-requests', allocationRequestsHandler);
     app.use('/api/leave-requests', leaveRequestsHandler);
+    app.use('/api/screening', screeningHandler);
 
     console.log('✅ All routes registered');
 
@@ -217,6 +230,16 @@ try {
     console.error('❌ Error loading routes:', error.message);
     console.error('❌ Stack:', error.stack);
     console.error('❌ CRITICAL: Routes not loaded! Server will have 404 errors.');
+    
+    // Create fallback error route
+    app.use('/api/*', (req, res) => {
+        res.status(500).json({
+            success: false,
+            error: 'Server initialization failed',
+            message: error.message,
+            hint: 'Check server logs for details'
+        });
+    });
 }
 
 // ============================================
@@ -229,7 +252,22 @@ app.use((req, res, next) => {
         error: 'Endpoint not found',
         path: req.path,
         method: req.method,
-        message: `The endpoint ${req.method} ${req.path} does not exist`
+        message: `The endpoint ${req.method} ${req.path} does not exist`,
+        availableEndpoints: [
+            '/api/dashboard',
+            '/api/proposals',
+            '/api/projects',
+            '/api/timesheets',
+            '/api/time-requests',
+            '/api/allocation-requests',
+            '/api/leave-requests',
+            '/api/screening',
+            '/api/notifications',
+            '/api/activities',
+            '/api/users',
+            '/api/variations',
+            '/api/email'
+        ]
     });
 });
 
@@ -247,23 +285,27 @@ app.use((err, req, res, next) => {
 // ============================================
 const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('');
-    console.log('╔═══════════════════════════════════════╗');
-    console.log(`║  ✅ Server running on port ${PORT}      ║`);
-    console.log(`║  🌐 Environment: ${(process.env.NODE_ENV || 'development').padEnd(20)}║`);
+    console.log('╔═══════════════════════════════════════════╗');
+    console.log(`║  ✅ Server running on port ${PORT}            ║`);
+    console.log(`║  🌍 Environment: ${(process.env.NODE_ENV || 'development').padEnd(20)}║`);
     const admin = require('./api/_firebase-admin');
     console.log(`║  🔥 Firebase: ${(admin.apps.length > 0 ? 'Initialized' : 'Not initialized').padEnd(23)}║`);
-    console.log('║  🌐 CORS: Enabled for Vercel           ║');
-    console.log('╚═══════════════════════════════════════╝');
+    console.log('║  🌐 CORS: Enabled                         ║');
+    console.log('║  📐 Design Files: Enabled                 ║');
+    console.log('╚═══════════════════════════════════════════╝');
     console.log('');
     console.log('📡 API Endpoints ready:');
     console.log('   GET  /health');
-    console.log('   GET  /api/dashboard');
+    console.log('   *    /api/dashboard');
     console.log('   *    /api/proposals');
-    console.log('   *    /api/projects');
-    console.log('   *    /api/allocation-requests  ← NEW');
-    console.log('   *    /api/leave-requests  ← NEW');
+    console.log('   *    /api/projects (+ Design File Workflow)');
     console.log('   *    /api/timesheets');
     console.log('   *    /api/time-requests');
+    console.log('   *    /api/allocation-requests');
+    console.log('   *    /api/leave-requests');
+    console.log('   *    /api/screening');
+    console.log('   *    /api/notifications');
+    console.log('   *    /api/email');
     console.log('');
 });
 
@@ -287,5 +329,3 @@ process.on('SIGINT', () => {
 });
 
 module.exports = app;
-
-

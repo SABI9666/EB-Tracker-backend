@@ -1034,7 +1034,9 @@ const handler = async (req, res) => {
                     fileSize, 
                     clientEmail, 
                     clientName,
-                    notes 
+                    notes,
+                    uploadType,
+                    isExternalLink 
                 } = data;
 
                 // Validation
@@ -1063,6 +1065,8 @@ const handler = async (req, res) => {
                     fileName: fileName,
                     fileUrl: fileUrl,
                     fileSize: fileSize || 0,
+                    uploadType: uploadType || 'file', // 'file' or 'link'
+                    isExternalLink: isExternalLink || false,
                     
                     // Client Info
                     clientEmail: clientEmail.toLowerCase().trim(),
@@ -1088,21 +1092,23 @@ const handler = async (req, res) => {
                 const designFileRef = await db.collection('designFiles').add(designFileData);
 
                 // Log activity
+                const uploadTypeLabel = isExternalLink ? 'link' : 'file';
                 await db.collection('activities').add({
                     type: 'design_file_uploaded',
-                    details: `Design file uploaded for project: ${project.projectName} by ${req.user.name}`,
+                    details: `Design ${uploadTypeLabel} uploaded for project: ${project.projectName} by ${req.user.name}`,
                     performedByName: req.user.name,
                     performedByRole: req.user.role,
                     performedByUid: req.user.uid,
                     timestamp: admin.firestore.FieldValue.serverTimestamp(),
                     projectId: id,
                     designFileId: designFileRef.id,
-                    fileName: fileName
+                    fileName: fileName,
+                    isExternalLink: isExternalLink || false
                 });
 
                 return res.status(200).json({ 
                     success: true, 
-                    message: 'Design file uploaded successfully',
+                    message: `Design ${uploadTypeLabel} uploaded successfully`,
                     designFileId: designFileRef.id
                 });
             }
@@ -1426,6 +1432,8 @@ const handler = async (req, res) => {
                         // File Info
                         fileName: designFile.fileName,
                         fileUrl: designFile.fileUrl,
+                        isExternalLink: designFile.isExternalLink || designFile.uploadType === 'link',
+                        uploadType: designFile.uploadType || 'file',
                         
                         // Custom Message
                         customMessage: customMessage || '',

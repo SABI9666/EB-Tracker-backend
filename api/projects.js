@@ -66,34 +66,59 @@ const handler = async (req, res) => {
                 const projectIdFilter = req.query.projectId;
                 const statusFilter = req.query.status;
                 
-                let query = db.collection('designFiles');
-                
-                if (projectIdFilter) {
-                    query = query.where('projectId', '==', projectIdFilter);
+                try {
+                    let query = db.collection('designFiles');
+                    
+                    if (projectIdFilter) {
+                        query = query.where('projectId', '==', projectIdFilter);
+                    }
+                    
+                    // For designers, only show their own files
+                    if (req.user.role === 'designer') {
+                        query = query.where('uploadedByUid', '==', req.user.uid);
+                    }
+                    
+                    // For COO - show files pending approval
+                    if (statusFilter) {
+                        query = query.where('status', '==', statusFilter);
+                    }
+                    
+                    // Try with orderBy first
+                    let snapshot;
+                    try {
+                        snapshot = await query.orderBy('createdAt', 'desc').get();
+                    } catch (indexError) {
+                        // If index doesn't exist, fetch without ordering
+                        console.warn('⚠️ Firestore index missing, fetching without order:', indexError.message);
+                        snapshot = await query.get();
+                    }
+                    
+                    const designFiles = snapshot.docs.map(doc => ({
+                        id: doc.id,
+                        ...doc.data()
+                    }));
+                    
+                    // Sort manually if we couldn't use orderBy
+                    designFiles.sort((a, b) => {
+                        const dateA = a.createdAt?.seconds || a.createdAt || 0;
+                        const dateB = b.createdAt?.seconds || b.createdAt || 0;
+                        return dateB - dateA;
+                    });
+                    
+                    console.log(`📐 Found ${designFiles.length} design files for user ${req.user.email}`);
+                    
+                    return res.status(200).json({ 
+                        success: true, 
+                        data: designFiles 
+                    });
+                } catch (error) {
+                    console.error('❌ Error fetching design files:', error);
+                    return res.status(500).json({
+                        success: false,
+                        error: error.message,
+                        hint: 'You may need to create a Firestore composite index'
+                    });
                 }
-                
-                // For designers, only show their own files
-                if (req.user.role === 'designer') {
-                    query = query.where('uploadedByUid', '==', req.user.uid);
-                }
-                
-                // For COO - show files pending approval
-                if (statusFilter) {
-                    query = query.where('status', '==', statusFilter);
-                }
-                
-                query = query.orderBy('createdAt', 'desc');
-                
-                const snapshot = await query.get();
-                const designFiles = snapshot.docs.map(doc => ({
-                    id: doc.id,
-                    ...doc.data()
-                }));
-                
-                return res.status(200).json({ 
-                    success: true, 
-                    data: designFiles 
-                });
             }
 
             // ================================================

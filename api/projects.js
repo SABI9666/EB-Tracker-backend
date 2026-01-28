@@ -1,3 +1,6 @@
+
+Copy
+
 // api/projects.js - CONSOLIDATED with variation code generator + EMAIL NOTIFICATIONS + ALLOCATION EDITING + DESIGN FILE WORKFLOW + DOCUMENT CONTROLLER PORTAL
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
@@ -1166,9 +1169,7 @@ const handler = async (req, res) => {
                 const { 
                     fileName, 
                     fileUrl, 
-                    fileSize, 
-                    clientEmail, 
-                    clientName,
+                    fileSize,
                     notes,
                     uploadType,
                     isExternalLink 
@@ -1182,12 +1183,8 @@ const handler = async (req, res) => {
                     });
                 }
 
-                if (!clientEmail || !clientEmail.includes('@')) {
-                    return res.status(400).json({ 
-                        success: false, 
-                        error: 'Valid client email is required' 
-                    });
-                }
+                // Client email is NO LONGER required from designer
+                // It will be entered by Document Controller when sending
 
                 // Create design file record
                 const designFileData = {
@@ -1203,9 +1200,9 @@ const handler = async (req, res) => {
                     uploadType: uploadType || 'file', // 'file' or 'link'
                     isExternalLink: isExternalLink || false,
                     
-                    // Client Info
-                    clientEmail: clientEmail.toLowerCase().trim(),
-                    clientName: clientName || '',
+                    // Client Info - To be filled by Document Controller
+                    clientEmail: '',
+                    clientName: '',
                     
                     // Designer Info
                     uploadedByUid: req.user.uid,
@@ -1543,12 +1540,20 @@ const handler = async (req, res) => {
                     });
                 }
 
-                const { designFileId, customMessage, sentBy } = data;
+                const { designFileId, clientEmail, clientName, ccEmails, customMessage, sentBy } = data;
 
                 if (!designFileId) {
                     return res.status(400).json({ 
                         success: false, 
                         error: 'Design file ID is required' 
+                    });
+                }
+
+                // Client email is now required from DC
+                if (!clientEmail || !clientEmail.includes('@')) {
+                    return res.status(400).json({ 
+                        success: false, 
+                        error: 'Valid client email is required' 
                     });
                 }
 
@@ -1573,7 +1578,7 @@ const handler = async (req, res) => {
                     });
                 }
 
-                // Send professional email to client
+                // Send professional email to client (and CC recipients)
                 try {
                     const emailResult = await sendEmailNotification('design.sent_to_client', {
                         // Project Info
@@ -1581,9 +1586,10 @@ const handler = async (req, res) => {
                         projectCode: project.projectCode || '',
                         clientCompany: project.clientCompany || 'Valued Client',
                         
-                        // Client Info
-                        clientEmail: designFile.clientEmail,
-                        clientName: designFile.clientName || '',
+                        // Client Info (from DC form)
+                        clientEmail: clientEmail,
+                        clientName: clientName || '',
+                        ccEmails: ccEmails || [], // Array of CC emails
                         
                         // File Info
                         fileName: designFile.fileName,
@@ -1604,9 +1610,12 @@ const handler = async (req, res) => {
                         throw new Error(emailResult.error || 'Email sending failed');
                     }
 
-                    // Update status to sent
+                    // Update design file with client details and sent status
                     await designFileRef.update({
                         status: 'sent',
+                        clientEmail: clientEmail,
+                        clientName: clientName || '',
+                        ccEmails: ccEmails || [],
                         sentAt: admin.firestore.FieldValue.serverTimestamp(),
                         sentByUid: req.user.uid,
                         sentByName: req.user.name,

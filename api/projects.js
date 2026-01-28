@@ -1,5 +1,4 @@
 
-Copy
 
 // api/projects.js - CONSOLIDATED with variation code generator + EMAIL NOTIFICATIONS + ALLOCATION EDITING + DESIGN FILE WORKFLOW + DOCUMENT CONTROLLER PORTAL
 const admin = require('./_firebase-admin');

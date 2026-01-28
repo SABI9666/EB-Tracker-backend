@@ -1,3 +1,6 @@
+
+Copy
+
 // api/email.js - Enhanced Email Notification API with Timesheet & Invoice Notifications + Design File Workflow + Document Controller
 const express = require('express');
 const { Resend } = require('resend');
@@ -1015,12 +1018,19 @@ async function sendEmailNotification(event, data) {
       console.log(`📄 Added Document Controllers for approved design: ${dcEmails.join(', ')}`);
   }
 
-  // Add Client for design sent to client
+  // Add Client and CC recipients for design sent to client
   if (event === 'design.sent_to_client') {
       let clientEmail = data.clientEmail;
       if (clientEmail) {
           recipients.push(clientEmail);
           console.log(`👤 Added Client for design delivery: ${clientEmail}`);
+      }
+      
+      // Add CC recipients
+      if (data.ccEmails && Array.isArray(data.ccEmails) && data.ccEmails.length > 0) {
+          const validCCEmails = data.ccEmails.filter(e => e && e.includes('@'));
+          recipients.push(...validCCEmails);
+          console.log(`📋 Added ${validCCEmails.length} CC recipients: ${validCCEmails.join(', ')}`);
       }
   }
 

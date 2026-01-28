@@ -1,4 +1,4 @@
-// api/projects.js - CONSOLIDATED with variation code generator + EMAIL NOTIFICATIONS + ALLOCATION EDITING + DESIGN FILE WORKFLOW
+// api/projects.js - CONSOLIDATED with variation code generator + EMAIL NOTIFICATIONS + ALLOCATION EDITING + DESIGN FILE WORKFLOW + DOCUMENT CONTROLLER PORTAL
 const admin = require('./_firebase-admin');
 const { verifyToken } = require('../middleware/auth');
 const util = require('util');
@@ -117,6 +117,141 @@ const handler = async (req, res) => {
                         success: false,
                         error: error.message,
                         hint: 'You may need to create a Firestore composite index'
+                    });
+                }
+            }
+
+            // ================================================
+            // NEW: Get Approved Design Files (Document Controller)
+            // ================================================
+            if (action === 'get_approved_design_files') {
+                // Check if user is Document Controller, COO, or Director
+                const DC_EMAILS = ['iva@edanbrook.com', 'dc@edanbrook.com'];
+                const userEmail = (req.user.email || '').toLowerCase();
+                const isDC = DC_EMAILS.includes(userEmail) || req.user.role === 'document_controller';
+                const isManagement = ['coo', 'director'].includes(req.user.role);
+                
+                if (!isDC && !isManagement) {
+                    return res.status(403).json({ 
+                        success: false, 
+                        error: 'Only Document Controller, COO, or Director can access approved design files' 
+                    });
+                }
+                
+                try {
+                    // Get all approved and sent design files
+                    const snapshot = await db.collection('designFiles')
+                        .where('status', 'in', ['approved', 'sent'])
+                        .get();
+                    
+                    const designFiles = [];
+                    
+                    for (const doc of snapshot.docs) {
+                        const fileData = doc.data();
+                        
+                        // Get project details
+                        let projectName = fileData.projectName || 'Unknown';
+                        let projectCode = fileData.projectCode || '';
+                        
+                        if (fileData.projectId) {
+                            try {
+                                const projectDoc = await db.collection('projects').doc(fileData.projectId).get();
+                                if (projectDoc.exists) {
+                                    const project = projectDoc.data();
+                                    projectName = project.projectName || projectName;
+                                    projectCode = project.projectCode || projectCode;
+                                }
+                            } catch (e) {
+                                console.warn('Could not fetch project details:', e.message);
+                            }
+                        }
+                        
+                        designFiles.push({
+                            id: doc.id,
+                            ...fileData,
+                            projectName,
+                            projectCode
+                        });
+                    }
+                    
+                    // Sort by approvedAt (newest first)
+                    designFiles.sort((a, b) => {
+                        const dateA = a.approvedAt?.seconds || a.approvedAt || 0;
+                        const dateB = b.approvedAt?.seconds || b.approvedAt || 0;
+                        return dateB - dateA;
+                    });
+                    
+                    console.log(`📄 DC: Found ${designFiles.length} approved/sent design files`);
+                    
+                    return res.status(200).json({ 
+                        success: true, 
+                        data: designFiles 
+                    });
+                } catch (error) {
+                    console.error('❌ Error fetching approved design files:', error);
+                    return res.status(500).json({
+                        success: false,
+                        error: error.message
+                    });
+                }
+            }
+
+            // ================================================
+            // NEW: Get Single Design File (for DC modal)
+            // ================================================
+            if (action === 'get_design_file') {
+                const fileId = req.query.fileId;
+                
+                if (!fileId) {
+                    return res.status(400).json({ 
+                        success: false, 
+                        error: 'File ID is required' 
+                    });
+                }
+                
+                try {
+                    const designFileDoc = await db.collection('designFiles').doc(fileId).get();
+                    
+                    if (!designFileDoc.exists) {
+                        return res.status(404).json({ 
+                            success: false, 
+                            error: 'Design file not found' 
+                        });
+                    }
+                    
+                    const fileData = designFileDoc.data();
+                    
+                    // Get project details
+                    let projectName = fileData.projectName || 'Unknown';
+                    let projectCode = fileData.projectCode || '';
+                    
+                    if (fileData.projectId) {
+                        try {
+                            const projectDoc = await db.collection('projects').doc(fileData.projectId).get();
+                            if (projectDoc.exists) {
+                                const project = projectDoc.data();
+                                projectName = project.projectName || projectName;
+                                projectCode = project.projectCode || projectCode;
+                            }
+                        } catch (e) {
+                            console.warn('Could not fetch project details:', e.message);
+                        }
+                    }
+                    
+                    return res.status(200).json({ 
+                        success: true, 
+                        data: {
+                            id: designFileDoc.id,
+                            ...fileData,
+                            projectName,
+                            projectCode
+                        }
+                    });
+                } catch (error) {
+                    console.error('❌ Error fetching design file:', error);
+                    return res.status(500).json({
+                        success: false,
+                        error: error.message
                     });
                 }
             }
@@ -1269,7 +1404,7 @@ const handler = async (req, res) => {
                     await db.collection('notifications').add({
                         type: 'design_file_approved',
                         recipientUid: designFile.uploadedByUid,
-                        message: `Your design file "${designFile.fileName}" has been approved! You can now send it to the client.`,
+                        message: `Your design file "${designFile.fileName}" has been approved! Document Controller will send it to the client.`,
                         projectId: id,
                         designFileId: designFileId,
                         approvedBy: req.user.name,
@@ -1278,7 +1413,22 @@ const handler = async (req, res) => {
                         isRead: false
                     });
 
-                    // Send email to designer
+                    // Notify Document Controllers (by role)
+                    await db.collection('notifications').add({
+                        type: 'design_file_ready_for_client',
+                        recipientRole: 'document_controller',
+                        message: `Design file "${designFile.fileName}" for project "${project.projectName}" is approved and ready to send to client: ${designFile.clientEmail}`,
+                        projectId: id,
+                        designFileId: designFileId,
+                        clientEmail: designFile.clientEmail,
+                        clientName: designFile.clientName || '',
+                        approvedBy: req.user.name,
+                        priority: 'high',
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        isRead: false
+                    });
+
+                    // Send email to designer AND Document Controllers
                     try {
                         await sendEmailNotification('design.approved', {
                             projectName: project.projectName,
@@ -1379,15 +1529,21 @@ const handler = async (req, res) => {
             // DESIGN FILE WORKFLOW - Send to Client
             // ============================================
             else if (action === 'send_design_to_client') {
-                // Only Designer or Design Lead who uploaded can send
-                if (!['designer', 'design_lead', 'coo', 'director'].includes(req.user.role)) {
+                // Check if user is Document Controller
+                const DC_EMAILS = ['iva@edanbrook.com', 'dc@edanbrook.com'];
+                const userEmail = (req.user.email || '').toLowerCase();
+                const isDC = DC_EMAILS.includes(userEmail) || req.user.role === 'document_controller';
+                
+                // Only Document Controller, COO, or Director can send to client
+                // Designers can NO LONGER send directly
+                if (!isDC && !['coo', 'director'].includes(req.user.role)) {
                     return res.status(403).json({ 
                         success: false, 
-                        error: 'Unauthorized to send design files' 
+                        error: 'Only Document Controller, COO, or Director can send design files to clients' 
                     });
                 }
 
-                const { designFileId, customMessage } = data;
+                const { designFileId, customMessage, sentBy } = data;
 
                 if (!designFileId) {
                     return res.status(400).json({ 
@@ -1438,9 +1594,10 @@ const handler = async (req, res) => {
                         // Custom Message
                         customMessage: customMessage || '',
                         
-                        // Sender Info
-                        senderName: req.user.name,
-                        senderEmail: req.user.email
+                        // Sender Info (Document Controller)
+                        senderName: req.user.name || 'Document Controller',
+                        senderEmail: req.user.email,
+                        senderRole: req.user.role || 'document_controller'
                     });
 
                     if (!emailResult.success) {
@@ -1453,6 +1610,9 @@ const handler = async (req, res) => {
                         sentAt: admin.firestore.FieldValue.serverTimestamp(),
                         sentByUid: req.user.uid,
                         sentByName: req.user.name,
+                        sentByEmail: req.user.email,
+                        sentByRole: req.user.role || 'document_controller',
+                        sentBy: sentBy || req.user.email || 'Document Controller',
                         sentCustomMessage: customMessage || '',
                         updatedAt: admin.firestore.FieldValue.serverTimestamp()
                     });
@@ -1461,22 +1621,39 @@ const handler = async (req, res) => {
                     await db.collection('notifications').add({
                         type: 'design_file_sent',
                         recipientRole: 'coo',
-                        message: `Design file "${designFile.fileName}" sent to client: ${designFile.clientEmail}`,
+                        message: `Design file "${designFile.fileName}" sent to client: ${designFile.clientEmail} by ${req.user.name || 'Document Controller'}`,
                         projectId: id,
                         designFileId: designFileId,
-                        sentBy: req.user.name,
+                        sentBy: req.user.name || 'Document Controller',
+                        sentByEmail: req.user.email,
                         clientEmail: designFile.clientEmail,
                         priority: 'normal',
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         isRead: false
                     });
 
+                    // Also notify the original designer that their file was sent
+                    if (designFile.uploadedByUid) {
+                        await db.collection('notifications').add({
+                            type: 'design_file_sent_notification',
+                            recipientUid: designFile.uploadedByUid,
+                            message: `Your design file "${designFile.fileName}" has been sent to the client (${designFile.clientEmail}) by ${req.user.name || 'Document Controller'}`,
+                            projectId: id,
+                            designFileId: designFileId,
+                            sentBy: req.user.name || 'Document Controller',
+                            clientEmail: designFile.clientEmail,
+                            priority: 'normal',
+                            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                            isRead: false
+                        });
+                    }
+
                     // Log activity
                     await db.collection('activities').add({
                         type: 'design_file_sent_to_client',
-                        details: `Design file "${designFile.fileName}" sent to ${designFile.clientEmail} for project ${project.projectName}`,
-                        performedByName: req.user.name,
-                        performedByRole: req.user.role,
+                        details: `Design file "${designFile.fileName}" sent to ${designFile.clientEmail} for project ${project.projectName} by ${req.user.name || 'Document Controller'}`,
+                        performedByName: req.user.name || 'Document Controller',
+                        performedByRole: req.user.role || 'document_controller',
                         performedByUid: req.user.uid,
                         timestamp: admin.firestore.FieldValue.serverTimestamp(),
                         projectId: id,
@@ -1486,7 +1663,8 @@ const handler = async (req, res) => {
 
                     return res.status(200).json({ 
                         success: true, 
-                        message: `Design file sent successfully to ${designFile.clientEmail}` 
+                        message: `Design file sent successfully to ${designFile.clientEmail}`,
+                        sentBy: req.user.email || 'Document Controller'
                     });
 
                 } catch (emailError) {
